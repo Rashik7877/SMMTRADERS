@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>SM MOIDEEN TRADERS</title>
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<div class="app-container" id="app">
+
+  <!-- Header -->
+  <header class="app-header">
+    <h1 id="app-title">SM MOIDEEN TRADERS</h1>
+    <div class="header-actions">
+      <button class="btn-icon" id="btn-settings" title="Settings" onclick="showPage('settings')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- ==================== DASHBOARD ==================== -->
+  <section id="page-dashboard" class="page-section active">
+    <h2 id="dashboard-title" style="display:none;"></h2>
+    <div class="dashboard-grid">
+      <div class="dash-card" onclick="showPage('new-booking')">
+        <div class="dash-card-icon">+</div>
+        <div class="dash-card-title">New Booking</div>
+        <div class="dash-card-desc">Create a new catering booking</div>
+      </div>
+      <div class="dash-card" onclick="showPage('search-booking')">
+        <div class="dash-card-icon">&#x1F50D;</div>
+        <div class="dash-card-title">Search Booking</div>
+        <div class="dash-card-desc">Find any booking quickly</div>
+      </div>
+      <div class="dash-card" onclick="showPage('upcoming-bookings')">
+        <div class="dash-card-icon">&#x1F4C6;</div>
+        <div class="dash-card-title">Upcoming Bookings</div>
+        <div class="dash-card-desc">View all pending &amp; collected bookings</div>
+      </div>
+      <div class="dash-card" onclick="showPage('pending-payments')">
+        <div class="dash-card-icon">&#x1F4B0;</div>
+        <div class="dash-card-title">Pending Payments</div>
+        <div class="dash-card-desc">Customers with balance due</div>
+      </div>
+      <div class="dash-card" onclick="showPage('scan-collection')">
+        <div class="dash-card-icon">&#x1F4F7;</div>
+        <div class="dash-card-title">Scan Collection</div>
+        <div class="dash-card-desc">Scan receipt barcode for fast collection</div>
+      </div>
+      <div class="dash-card" onclick="showPage('reports')">
+        <div class="dash-card-icon">&#x1F4CA;</div>
+        <div class="dash-card-title">Reports</div>
+        <div class="dash-card-desc">Daily, weekly &amp; monthly reports</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== NEW BOOKING ==================== -->
+  <section id="page-new-booking" class="page-section">
+    <div class="page-header">
+      <button class="btn-back" onclick="showPage('dashboard')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      </button>
+      <h2>New Booking</h2>
+    </div>
+
+    <form id="booking-form" autocomplete="off" onsubmit="return saveBooking(event)">
+      <!-- Customer Info -->
+      <div class="form-section">
+        <div class="form-section-title">Customer Information</div>
+        <div class="form-group">
+          <label class="form-label" for="customer-name">Customer Name *</label>
+          <input type="text" class="form-input form-input-lg" id="customer-name" placeholder="Enter customer name" required autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="customer-phone">Phone Number *</label>
+          <input type="tel" class="form-input form-input-lg" id="customer-phone" placeholder="Enter phone number" required autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="customer-village">Village / Area</label>
+          <input type="text" class="form-input" id="customer-village" placeholder="Optional" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+        </div>
+      </div>
+
+      <!-- Booking Details -->
+      <div class="form-section">
+        <div class="form-section-title">Booking Information</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Booking Date</label>
+            <input type="text" class="form-input form-input-static" id="booking-date" readonly>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Token Number</label>
+            <input type="text" class="form-input form-input-static" id="token-number" value="Auto-generated (e.g. SMM0001)" readonly>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label" for="function-date">Collection Date *</label>
+            <input type="date" class="form-input form-input-lg" id="function-date" required autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="pickup-time">Collection Time</label>
+            <input type="time" class="form-input" id="pickup-time" autocomplete="off">
+          </div>
+        </div>
+      </div>
+
+      <!-- Order -->
+      <div class="form-section">
+        <div class="form-section-title">Order</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label" for="mutton-qty">Mutton Biriyani (Padi)</label>
+            <input type="number" class="form-input form-input-lg" id="mutton-qty" min="0" step="0.25" value="0" autocomplete="off" oninput="calcTotals()">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="chicken-qty">Chicken 65 (Kg)</label>
+            <input type="number" class="form-input form-input-lg" id="chicken-qty" min="0" step="0.25" value="0" autocomplete="off" oninput="calcTotals()">
+          </div>
+        </div>
+      </div>
+
+      <!-- Pricing -->
+      <div class="form-section">
+        <div class="form-section-title">Pricing</div>
+        <div class="form-group">
+          <div class="form-row">
+            <div class="detail-item">
+              <span class="detail-label">Mutton Biriyani Price</span>
+              <span class="detail-value" id="display-mutton-price">- / Padi</span>
+            </div>
+            <div class="detail-item">
+              <span class="detail-label">Chicken 65 Price</span>
+              <span class="detail-value" id="display-chicken-price">- / Kg</span>
+            </div>
+          </div>
+        </div>
+        <div class="form-group">
+          <div class="detail-item">
+            <span class="detail-label">Mutton Biriyani Total</span>
+            <span class="detail-value amount" id="mutton-total">-</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Chicken 65 Total</span>
+            <span class="detail-value amount" id="chicken-total">-</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Grand Total</span>
+            <span class="detail-value amount" id="grand-total" style="font-size:1.3rem;">-</span>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label" for="advance-paid">Advance Paid (?)</label>
+            <input type="number" class="form-input form-input-lg" id="advance-paid" min="0" step="1" value="0" autocomplete="off" oninput="calcTotals()">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Balance</label>
+            <input type="text" class="form-input form-input-static" id="balance" value="-" readonly>
+          </div>
+        </div>
+      </div>
+
+      <div class="form-section">
+        <div class="form-group" style="margin-bottom:0;">
+          <label class="form-label" for="booking-notes">Notes</label>
+          <textarea class="form-textarea" id="booking-notes" placeholder="Any special instructions..." rows="2" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+        </div>
+      </div>
+
+      <div class="btn-group" style="margin-bottom:24px;">
+        <button type="submit" class="btn btn-primary btn-lg btn-block">Save Booking</button>
+        <button type="reset" class="btn btn-secondary btn-lg" onclick="resetBookingForm()">Reset</button>
+      </div>
+    </form>
+  </section>
+
+  <!-- ==================== SUCCESS MODAL ==================== -->
+  <div class="modal-overlay" id="success-modal">
+    <div class="modal" id="success-modal-content">
+    </div>
+  </div>
+
+  <!-- ==================== SEARCH BOOKING ==================== -->
+  <section id="page-search-booking" class="page-section">
+    <div class="page-header">
+      <button class="btn-back" onclick="showPage('dashboard')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      </button>
+      <h2>Search Booking</h2>
+    </div>
+    <div class="search-container">
+      <span class="search-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+      </span>
+      <input type="text" class="search-input" id="search-input" placeholder="Search by Token, Phone or Name..." oninput="searchBookings()" autocomplete="off">
+    </div>
+    <div id="search-results"></div>
+  </section>
+
+  <!-- ==================== BOOKING DETAILS ==================== -->
+  <section id="page-booking-details" class="page-section">
+    <div class="page-header">
+<button class="btn-back" onclick="goBackFromBooking()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      </button>
+      <h2 id="detail-title">Booking Details</h2>
+    </div>
+    <div id="booking-detail-content"></div>
+  </section>
+
+  <!-- ==================== UPCOMING BOOKINGS ==================== -->
+  <section id="page-upcoming-bookings" class="page-section">
+    <div class="page-header">
+      <button class="btn-back" onclick="showPage('dashboard')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      </button>
+      <h2>Upcoming Bookings</h2>
+    </div>
+    <div class="filter-group" id="upcoming-filters">
+      <button class="filter-btn active" data-filter="season" onclick="filterUpcoming('season')">Current Season</button>
+      <button class="filter-btn" data-filter="pending" onclick="filterUpcoming('pending')">Pending Collection</button>
+      <button class="filter-btn" data-filter="collected" onclick="filterUpcoming('collected')">Collected</button>
+      <button class="filter-btn" data-filter="all" onclick="filterUpcoming('all')">All</button>
+    </div>
+    <div class="search-container" style="margin-bottom:12px;">
+      <span class="search-icon" style="left:12px;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+      </span>
+      <input type="search" class="search-input" id="upcoming-search" placeholder="Filter by name, phone or token..." style="padding:10px 10px 10px 42px;font-size:0.9rem;" autocomplete="off" oninput="filterUpcoming()">
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
+      <label style="font-size:0.85rem;color:var(--text-secondary);">Sort:</label>
+      <select class="form-select" id="sort-upcoming" onchange="loadUpcoming(currentUpcomingFilter)" style="flex:1;padding:8px 12px;font-size:0.85rem;">
+        <option value="function_date ASC">Date (Earliest)</option>
+        <option value="function_date DESC">Date (Latest)</option>
+        <option value="customer_name ASC">Name (A-Z)</option>
+        <option value="customer_name DESC">Name (Z-A)</option>
+        <option value="token_number ASC">Token (A-Z)</option>
+      </select>
+      <button class="btn btn-secondary btn-sm" id="toggle-calendar-btn" onclick="toggleCalendar()">Calendar</button>
+      <button class="btn btn-accent btn-sm" onclick="downloadCSV('upcoming')">Export CSV</button>
+    </div>
+    <div id="upcoming-list"></div>
+    <div id="calendar-container" style="display:none;">
+      <div class="calendar-nav">
+        <button class="btn-icon" onclick="navigateCalendar(-1)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
+        <h3 id="calendar-label"></h3>
+        <button class="btn-icon" onclick="navigateCalendar(1)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+        </button>
+      </div>
+      <div class="calendar-grid" id="calendar-grid"></div>
+    </div>
+  </section>
+
+  <!-- ==================== PENDING PAYMENTS ==================== -->
+  <section id="page-pending-payments" class="page-section">
+    <div class="page-header">
+      <button class="btn-back" onclick="showPage('dashboard')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      </button>
+      <h2>Pending Payments</h2>
+      <span id="pending-count" class="status-badge pending" style="font-size:0.85rem;">0</span>
+      <button class="btn btn-accent btn-sm" onclick="downloadCSV('pending')">Export CSV</button>
+    </div>
+    <div id="pending-list"></div>
+  </section>
+
+  <!-- ==================== SCAN COLLECTION ==================== -->
+  <section id="page-scan-collection" class="page-section">
+    <div class="page-header">
+      <button class="btn-back" onclick="showPage('dashboard')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      </button>
+      <h2>Scan Collection</h2>
+      <span style="font-size:0.75rem;color:var(--text-light);">ESC: Exit &middot; F2: Focus</span>
+    </div>
+    <div id="scan-container">
+      <div id="scan-waiting" class="scan-waiting">
+        <div class="scan-icon">&#x1F4F7;</div>
+        <h3>Scan Customer Receipt</h3>
+        <p>Waiting for barcode...</p>
+        <input type="text" id="scan-input" class="scan-input" placeholder="Scan barcode here..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+      </div>
+      <div id="scan-result" class="scan-result" style="display:none;"></div>
+    </div>
+  </section>
+
+  <!-- ==================== REPORTS ==================== -->
+  <section id="page-reports" class="page-section">
+    <div class="page-header">
+      <button class="btn-back" onclick="showPage('dashboard')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      </button>
+      <h2>Reports</h2>
+    </div>
+    <div class="filter-group" id="report-filters">
+      <button class="filter-btn active" onclick="loadReport('season')">Current Season</button>
+      <button class="filter-btn" onclick="dailyReport()">Daily</button>
+      <button class="filter-btn" onclick="weeklyReport()">Weekly</button>
+      <button class="filter-btn" onclick="monthlyReport()">Monthly</button>
+    </div>
+    <div id="report-content"></div>
+  </section>
+
+  <!-- ==================== SETTINGS ==================== -->
+  <section id="page-settings" class="page-section">
+    <div class="page-header">
+      <button class="btn-back" onclick="showPage('dashboard')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      </button>
+      <h2>Settings</h2>
+    </div>
+    <form id="settings-form" autocomplete="off" onsubmit="return saveSettings(event)">
+      <div class="form-section">
+        <div class="form-section-title">Business Information</div>
+        <div class="form-group">
+          <label class="form-label" for="setting-business">Business Name</label>
+          <input type="text" class="form-input form-input-lg" id="setting-business" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="setting-address">Address</label>
+          <textarea class="form-textarea" id="setting-address" rows="2" placeholder="Business address" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="setting-phone">Phone Number</label>
+          <input type="tel" class="form-input form-input-lg" id="setting-phone" placeholder="Business phone number" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+        </div>
+      </div>
+      <div class="form-section">
+        <div class="form-section-title">Pricing</div>
+        <div class="form-group">
+          <label class="form-label" for="setting-mutton">Mutton Biriyani (? / Padi)</label>
+          <input type="number" class="form-input form-input-lg" id="setting-mutton" min="0" step="1" autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="setting-chicken">Chicken 65 (? / Kg)</label>
+          <input type="number" class="form-input form-input-lg" id="setting-chicken" min="0" step="1" autocomplete="off">
+        </div>
+      </div>
+      <div class="form-section">
+        <div class="form-section-title">Default Collection Details</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label" for="setting-collection-date">Default Collection Date</label>
+            <input type="date" class="form-input form-input-lg" id="setting-collection-date" autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="setting-collection-time">Default Collection Time</label>
+            <input type="time" class="form-input form-input-lg" id="setting-collection-time" autocomplete="off">
+          </div>
+        </div>
+      </div>
+      <div class="form-section">
+        <div class="form-section-title">Receipt</div>
+        <div class="form-group">
+          <label class="form-label" for="setting-footer">Receipt Footer Message</label>
+          <textarea class="form-textarea" id="setting-footer" rows="2" placeholder="Thank you message..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+        </div>
+      </div>
+      <button type="submit" class="btn btn-primary btn-lg btn-block">Save Settings</button>
+    </form>
+  </section>
+
+  <!-- ==================== PAYMENT MODAL ==================== -->
+  <div class="modal-overlay" id="payment-modal">
+    <div class="modal" style="text-align:left;">
+      <h3 style="margin-bottom:16px;text-align:center;">Receive Payment</h3>
+      <div style="margin-bottom:16px;padding:12px;background:var(--border-light);border-radius:var(--radius-sm);">
+        <p style="font-size:0.85rem;color:var(--text-secondary);">Customer: <strong id="pmt-customer" style="color:var(--text);"></strong></p>
+        <p style="font-size:0.85rem;color:var(--text-secondary);">Token: <strong id="pmt-token" style="color:var(--text);"></strong></p>
+        <p style="font-size:0.85rem;color:var(--text-secondary);">Balance Due: <strong id="pmt-balance" style="color:var(--danger);"></strong></p>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="pmt-amount">Amount Received (?)</label>
+        <input type="number" class="form-input form-input-lg" id="pmt-amount" min="0.01" step="0.01" required autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="pmt-notes">Notes</label>
+        <input type="text" class="form-input" id="pmt-notes" placeholder="Optional" autocomplete="off">
+      </div>
+      <div class="btn-group" style="margin-top:16px;">
+        <button class="btn btn-success btn-lg" onclick="submitPayment()">Confirm Payment</button>
+        <button class="btn btn-secondary" onclick="closeModal('payment-modal')">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== COLLECTION MODAL ==================== -->
+  <div class="modal-overlay" id="collection-modal">
+    <div class="modal" style="text-align:left;">
+      <h3 style="margin-bottom:16px;text-align:center;">Complete Collection</h3>
+      <div style="margin-bottom:16px;padding:12px;background:var(--border-light);border-radius:var(--radius-sm);">
+        <p style="font-size:0.85rem;color:var(--text-secondary);">Customer: <strong id="col-customer" style="color:var(--text);"></strong></p>
+        <p style="font-size:0.85rem;color:var(--text-secondary);">Token: <strong id="col-token" style="color:var(--text);"></strong></p>
+        <p style="font-size:0.85rem;color:var(--text-secondary);">Total Amount: <strong id="col-total" style="color:var(--text);"></strong></p>
+        <p style="font-size:0.85rem;color:var(--text-secondary);">Advance Paid: <strong id="col-advance" style="color:var(--success);"></strong></p>
+        <p style="font-size:0.85rem;color:var(--text-secondary);">Remaining Balance: <strong id="col-balance" style="color:var(--danger);"></strong></p>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="col-amount">Amount Received Today (?)</label>
+        <input type="number" class="form-input form-input-lg" id="col-amount" min="0" step="0.01" value="0" autocomplete="off" oninput="calcCollectionBalance()">
+      </div>
+      <div class="form-group">
+        <label class="form-label">New Remaining Balance</label>
+        <input type="text" class="form-input form-input-static" id="col-new-balance" readonly>
+      </div>
+      <div class="btn-group" style="margin-top:16px;">
+        <button class="btn btn-success btn-lg" onclick="confirmCollection()">Confirm Collection</button>
+        <button class="btn btn-secondary" onclick="closeModal('collection-modal')">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== EDIT BOOKING MODAL ==================== -->
+  <div class="modal-overlay" id="edit-modal">
+    <div class="modal" style="text-align:left;max-width:520px;">
+      <h3 style="margin-bottom:16px;">Edit Booking</h3>
+      <form id="edit-form" autocomplete="off" onsubmit="return submitEdit(event)">
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Customer Name</label>
+            <input type="text" class="form-input" id="edit-name" required autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Phone</label>
+            <input type="tel" class="form-input" id="edit-phone" required autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Village</label>
+          <input type="text" class="form-input" id="edit-village" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Collection Date</label>
+            <input type="date" class="form-input" id="edit-func-date" required autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Collection Time</label>
+            <input type="time" class="form-input" id="edit-pickup" autocomplete="off">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Mutton Biriyani (Padi)</label>
+            <input type="number" class="form-input" id="edit-mutton" min="0" step="0.25" value="0" autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Chicken 65 (Kg)</label>
+            <input type="number" class="form-input" id="edit-chicken" min="0" step="0.25" value="0" autocomplete="off">
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Notes</label>
+          <textarea class="form-textarea" id="edit-notes" rows="2" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+        </div>
+        <div class="btn-group" style="margin-top:16px;">
+          <button type="submit" class="btn btn-primary">Save Changes</button>
+          <button type="button" class="btn btn-secondary" onclick="closeModal('edit-modal')">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ==================== TOAST CONTAINER ==================== -->
+  <div class="toast-container" id="toast-container"></div>
+
+</div>
+
+    <script src="/static/js/app.js?v=12"></script>
+</body>
+</html>
