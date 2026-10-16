@@ -3,15 +3,7 @@
     "main.py": {
       "maxDuration": 60,
       "includeFiles": "static/**",
-      "excludeFiles": [
-        "test_*.py",
-        "**/__pycache__/**",
-        ".pytest_cache/**",
-        "scripts/**",
-        "*.db",
-        ".env*",
-        "smm_traders.db-*"
-      ]
+      "excludeFiles": "{test_*.py,conftest.py,scripts/**,**/__pycache__/**,.pytest_cache/**,*.db,*.db-*,.env*}"
     }
   }
 }
