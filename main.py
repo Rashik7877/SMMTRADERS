@@ -1,18 +1,21 @@
 import calendar
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import os
+import re
 import sqlite3
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import FastAPI, HTTPException, Query, status
+from fastapi import FastAPI, HTTPException, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from pdf_reports import build_report_pdf
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "smm_traders.db")
+DB_PATH = os.environ.get("SMM_TRADERS_DB", os.path.join(BASE_DIR, "smm_traders.db"))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
 
@@ -36,7 +39,9 @@ def init_db():
                 chicken_65_price REAL NOT NULL DEFAULT 350.0,
                 collection_date TEXT,
                 collection_time TEXT,
-                receipt_footer TEXT
+                receipt_footer TEXT,
+                financial_start_date TEXT,
+                financial_end_date TEXT
             )
         """)
 
@@ -74,20 +79,165 @@ def init_db():
             )
         """)
 
+        # Backward-compatible migrations for databases created by older versions.
+        existing_cols = {row[1] for row in cursor.execute("PRAGMA table_info(settings)").fetchall()}
+        for col in ("financial_start_date", "financial_end_date"):
+            if col not in existing_cols:
+                cursor.execute(f"ALTER TABLE settings ADD COLUMN {col} TEXT")
+
+        payment_cols = {row[1] for row in cursor.execute("PRAGMA table_info(payments)").fetchall()}
+        if "request_id" not in payment_cols:
+            cursor.execute("ALTER TABLE payments ADD COLUMN request_id TEXT")
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_request_id "
+            "ON payments(request_id) WHERE request_id IS NOT NULL"
+        )
+
         cursor.execute("SELECT COUNT(*) FROM settings WHERE id = 1")
         if cursor.fetchone()[0] == 0:
             cursor.execute("""
                 INSERT INTO settings (
                     id, business_name, address, phone,
                     mutton_biriyani_price, chicken_65_price,
-                    collection_date, collection_time, receipt_footer
+                    collection_date, collection_time, receipt_footer,
+                    financial_start_date, financial_end_date
                 ) VALUES (
                     1, 'SM MOIDEEN TRADERS', 'Tenkasi, Tamil Nadu', '9876543210',
                     2500.0, 350.0, '', '12:00',
-                    'Thank you for your order! Please bring your token/receipt during collection.'
+                    '', '', ''
                 )
             """)
         conn.commit()
+
+
+# --- Validation helpers ---
+
+INDIAN_MOBILE_RE = re.compile(r"^(?:\+91|91|0)?([6-9]\d{9})$")
+PHONE_CLEAN_RE = re.compile(r"[\s\-().]")
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+def normalize_phone(raw: Optional[str]) -> str:
+    """Validate and normalise a customer phone number.
+
+    Only Indian 10-digit mobile numbers starting with 6-9 are allowed.
+    Returns the bare 10-digit number. Raises ValueError otherwise.
+    """
+    if raw is None:
+        raise ValueError("Phone number is required")
+    cleaned = PHONE_CLEAN_RE.sub("", str(raw).strip())
+    if not cleaned:
+        raise ValueError("Phone number is required")
+    if not cleaned.startswith("+"):
+        cleaned = cleaned.replace("+", "")
+    if any(ch.isalpha() for ch in cleaned):
+        raise ValueError("Phone number cannot contain letters")
+
+    indian = INDIAN_MOBILE_RE.fullmatch(cleaned)
+    if indian:
+        return indian.group(1)
+
+    raise ValueError(
+        "Enter a valid 10-digit mobile number starting with 6, 7, 8 or 9 (e.g. 9876543210)."
+    )
+
+
+def parse_iso_date(value: Optional[str], label: str) -> Optional[date]:
+    text = (value or "").strip()
+    if not text:
+        return None
+    if not DATE_RE.fullmatch(text):
+        raise ValueError(f"{label} must be a valid date in YYYY-MM-DD format")
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        raise ValueError(f"{label} must be a valid calendar date")
+
+
+def validate_time_value(value: Optional[str], label: str) -> str:
+    text = (value or "").strip()
+    if not text:
+        return ""
+    if not TIME_RE.fullmatch(text):
+        raise ValueError(f"{label} must be a valid time in HH:MM (24 hour) format")
+    return text
+
+
+def parse_scan_payload(raw: Optional[str]) -> Tuple[Optional[str], Optional[int]]:
+    """Return (compact_token, numeric_identifier) for a scanned SMM code.
+
+    The established QR identifier is the fixed prefix ``S M M `` followed by a
+    variable numeric identifier. Scanner noise (line breaks, leading/trailing
+    spaces, repeated spaces) is normalised away. Returns (None, None) when the
+    payload does not follow the format at all.
+    """
+    if raw is None:
+        return None, None
+    text = str(raw).replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    compact = re.sub(r"\s+", "", text).upper()
+    match = re.fullmatch(r"SMM(\d{1,9})", compact)
+    if not match:
+        return None, None
+    return compact, int(match.group(1))
+
+
+def resolve_scan_code(conn: sqlite3.Connection, raw: Optional[str]) -> Dict[str, Any]:
+    """Look up the booking referenced by a scanned SMM code.
+
+    Raises HTTPException(400) for malformed codes and HTTPException(404) when no
+    (or more than one) booking matches, so a wrong customer can never be served.
+    """
+    compact, identifier = parse_scan_payload(raw)
+    if identifier is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Malformed QR code. Expected the format 'S M M <number>'.",
+        )
+
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id FROM bookings WHERE UPPER(token_number) = ?", (compact,)
+    )
+    row = cursor.fetchone()
+
+    if not row:
+        # The numeric identifier may be stored with or without zero padding
+        # (e.g. scanned "S M M 1" maps to the stored token "SMM0001").
+        padded = f"SMM{identifier:04d}"
+        cursor.execute(
+            "SELECT id FROM bookings WHERE UPPER(token_number) = ?", (padded.upper(),)
+        )
+        candidates = cursor.fetchall()
+        if len(candidates) > 1:
+            raise HTTPException(
+                status_code=409,
+                detail="This QR code matches more than one booking. Please contact the administrator.",
+            )
+        row = candidates[0] if candidates else None
+
+    if not row:
+        # Safeguard against zero-padding ambiguity: match by numeric value but
+        # only for genuine SMM tokens, and refuse ambiguous matches.
+        cursor.execute(
+            "SELECT id FROM bookings WHERE UPPER(token_number) LIKE 'SMM%' "
+            "AND CAST(SUBSTR(UPPER(token_number), 4) AS INTEGER) = ?",
+            (identifier,),
+        )
+        candidates = cursor.fetchall()
+        if len(candidates) > 1:
+            raise HTTPException(
+                status_code=409,
+                detail="This QR code matches more than one booking. Please contact the administrator.",
+            )
+        row = candidates[0] if candidates else None
+
+    if not row:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No booking matches the scanned code ({compact}).",
+        )
+    return get_booking_with_payments(conn, row["id"])
 
 
 @asynccontextmanager
@@ -118,56 +268,109 @@ class SettingsSchema(BaseModel):
     collection_date: Optional[str] = ""
     collection_time: Optional[str] = ""
     receipt_footer: Optional[str] = ""
+    financial_start_date: Optional[str] = ""
+    financial_end_date: Optional[str] = ""
+
+    @field_validator("collection_date", "financial_start_date", "financial_end_date")
+    @classmethod
+    def validate_dates(cls, v: Optional[str], info) -> str:
+        label = {
+            "collection_date": "Collection date",
+            "financial_start_date": "Financial period start date",
+            "financial_end_date": "Financial period end date",
+        }.get(info.field_name, "Date")
+        parse_iso_date(v, label)
+        return (v or "").strip()
+
+    @field_validator("collection_time")
+    @classmethod
+    def validate_collection_time(cls, v: Optional[str]) -> str:
+        return validate_time_value(v, "Collection time")
+
+    @model_validator(mode="after")
+    def validate_financial_period(self) -> "SettingsSchema":
+        start = parse_iso_date(self.financial_start_date, "Financial period start date")
+        end = parse_iso_date(self.financial_end_date, "Financial period end date")
+        if (start is None) != (end is None):
+            raise ValueError("Provide both the financial period start date and end date.")
+        if start and end and end < start:
+            raise ValueError("Financial period end date cannot be earlier than the start date.")
+        return self
 
 
-class CreateBookingSchema(BaseModel):
+class BaseBookingSchema(BaseModel):
     customer_name: str
     phone: str
     village: Optional[str] = ""
-    function_date: str
+    # The collection date is fixed by Settings.collection_date. It is accepted
+    # here only so existing/historical records can still be created with a date
+    # when Settings has no default configured.
+    function_date: Optional[str] = ""
     pickup_time: Optional[str] = ""
     mutton_qty: float = Field(default=0.0, ge=0)
     chicken_qty: float = Field(default=0.0, ge=0)
+    notes: Optional[str] = ""
+
+    @field_validator("function_date")
+    @classmethod
+    def validate_function_date(cls, v: Optional[str]) -> str:
+        if not (v or "").strip():
+            return ""
+        parsed = parse_iso_date(v, "Collection date")
+        if parsed is None:
+            raise ValueError("Collection date is required")
+        return parsed.strftime("%Y-%m-%d")
+
+    @field_validator("pickup_time")
+    @classmethod
+    def validate_pickup_time(cls, v: Optional[str]) -> str:
+        return ""  # Collection time is fixed by Settings
+
+    @field_validator("mutton_qty", "chicken_qty")
+    @classmethod
+    def validate_quarter_step(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("Quantity cannot be negative")
+        if round(v * 1000) % 250 != 0:
+            raise ValueError("Quantity must be in increments of 0.25 (e.g., 0.25, 0.50, 0.75, 1.00, 1.25)")
+        return v
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, v: str) -> str:
+        # Only Indian 10-digit mobile numbers (6-9 + 9 digits) are allowed.
+        return normalize_phone(v)
+
+    @field_validator("pickup_time")
+    @classmethod
+    def validate_pickup_time(cls, v: Optional[str]) -> str:
+        return validate_time_value(v, "Collection time")
+
+    @field_validator("customer_name")
+    @classmethod
+    def validate_customer_name(cls, v: str) -> str:
+        if not (v or "").strip():
+            raise ValueError("Customer name is required")
+        return v.strip()
+
+
+class CreateBookingSchema(BaseBookingSchema):
     advance_paid: float = Field(default=0.0, ge=0)
-    notes: Optional[str] = ""
-
-    @field_validator("mutton_qty", "chicken_qty")
-    @classmethod
-    def validate_quarter_step(cls, v: float) -> float:
-        if v < 0:
-            raise ValueError("Quantity cannot be negative")
-        if round(v * 1000) % 250 != 0:
-            raise ValueError("Quantity must be in increments of 0.25 (e.g., 0.25, 0.50, 0.75, 1.00, 1.25)")
-        return v
 
 
-class UpdateBookingSchema(BaseModel):
-    customer_name: str
-    phone: str
-    village: Optional[str] = ""
-    function_date: str
-    pickup_time: Optional[str] = ""
-    mutton_qty: float = Field(default=0.0, ge=0)
-    chicken_qty: float = Field(default=0.0, ge=0)
-    notes: Optional[str] = ""
-
-    @field_validator("mutton_qty", "chicken_qty")
-    @classmethod
-    def validate_quarter_step(cls, v: float) -> float:
-        if v < 0:
-            raise ValueError("Quantity cannot be negative")
-        if round(v * 1000) % 250 != 0:
-            raise ValueError("Quantity must be in increments of 0.25 (e.g., 0.25, 0.50, 0.75, 1.00, 1.25)")
-        return v
+class UpdateBookingSchema(BaseBookingSchema):
+    pass
 
 
 class CollectBookingSchema(BaseModel):
     amount_received: float = Field(default=0.0, ge=0)
+    request_id: Optional[str] = None
 
 
 class AddPaymentSchema(BaseModel):
     amount: float = Field(gt=0)
     notes: Optional[str] = ""
+    request_id: Optional[str] = None
 
 
 # --- Helper Functions ---
@@ -232,7 +435,9 @@ def update_settings(data: SettingsSchema):
                 chicken_65_price = ?,
                 collection_date = ?,
                 collection_time = ?,
-                receipt_footer = ?
+                receipt_footer = ?,
+                financial_start_date = ?,
+                financial_end_date = ?
             WHERE id = 1
         """, (
             data.business_name,
@@ -242,7 +447,9 @@ def update_settings(data: SettingsSchema):
             data.chicken_65_price,
             data.collection_date or "",
             data.collection_time or "",
-            data.receipt_footer or ""
+            data.receipt_footer or "",
+            data.financial_start_date or "",
+            data.financial_end_date or ""
         ))
         conn.commit()
         cursor.execute("SELECT * FROM settings WHERE id = 1")
@@ -329,20 +536,19 @@ def get_booking(booking_id: int):
 
 @app.get("/api/bookings/by-token/{token}")
 def get_booking_by_token(token: str):
-    clean_token = token.strip()
     with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM bookings WHERE LOWER(token_number) = LOWER(?)", (clean_token,))
-        row = cursor.fetchone()
-        if not row:
-            digits = "".join(ch for ch in clean_token if ch.isdigit())
-            if digits:
-                formatted_token = f"SMM{int(digits):04d}"
-                cursor.execute("SELECT id FROM bookings WHERE LOWER(token_number) = LOWER(?)", (formatted_token,))
-                row = cursor.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Booking with token not found")
-        return get_booking_with_payments(conn, row["id"])
+        raw = (token or "").strip()
+        # Manual keypad entry may be just the numeric identifier (e.g. "123").
+        if raw.isdigit():
+            raw = f"SMM{raw}"
+        return resolve_scan_code(conn, raw)
+
+
+@app.get("/api/scan")
+def scan_booking(code: str = Query(..., description="Scanned QR/barcode payload")):
+    """Resolve a scanned SMM QR/barcode to its booking without recording anything."""
+    with get_db() as conn:
+        return resolve_scan_code(conn, code)
 
 
 @app.post("/api/bookings", status_code=status.HTTP_201_CREATED)
@@ -353,6 +559,18 @@ def create_booking(data: CreateBookingSchema):
         settings = cursor.fetchone()
         mutton_price = float(settings["mutton_biriyani_price"]) if settings else 0.0
         chicken_price = float(settings["chicken_65_price"]) if settings else 0.0
+        # Collection date is fixed by Settings. It is only overridden when the
+        # Settings default is not configured (e.g. historical/seed data imports).
+        fixed_func_date = (settings["collection_date"] or "").strip() if settings else ""
+        func_date = fixed_func_date or data.function_date
+        if not func_date:
+            raise HTTPException(
+                status_code=400,
+                detail="Set the default collection date in Settings before creating bookings.",
+            )
+
+        fixed_func_time = (settings["collection_time"] or "").strip() if settings else ""
+        func_time = fixed_func_time or (data.pickup_time or "").strip()
 
         grand_total = round(data.mutton_qty * mutton_price + data.chicken_qty * chicken_price, 2)
         advance_paid = round(min(data.advance_paid, grand_total), 2)
@@ -382,8 +600,8 @@ def create_booking(data: CreateBookingSchema):
             data.phone.strip(),
             data.village.strip() if data.village else "",
             booking_date,
-            data.function_date.strip(),
-            data.pickup_time.strip() if data.pickup_time else "",
+            func_date,
+            func_time,
             data.mutton_qty,
             mutton_price,
             data.chicken_qty,
@@ -426,8 +644,6 @@ def update_booking(booking_id: int, data: UpdateBookingSchema):
                 customer_name = ?,
                 phone = ?,
                 village = ?,
-                function_date = ?,
-                pickup_time = ?,
                 mutton_qty = ?,
                 chicken_qty = ?,
                 grand_total = ?,
@@ -438,8 +654,6 @@ def update_booking(booking_id: int, data: UpdateBookingSchema):
             data.customer_name.strip(),
             data.phone.strip(),
             data.village.strip() if data.village else "",
-            data.function_date.strip(),
-            data.pickup_time.strip() if data.pickup_time else "",
             data.mutton_qty,
             data.chicken_qty,
             grand_total,
@@ -470,10 +684,16 @@ def collect_booking(booking_id: int, data: CollectBookingSchema):
         new_balance = round(max(0.0, grand_total - new_advance), 2)
 
         if amount_to_receive > 0:
-            cursor.execute("""
-                INSERT INTO payments (booking_id, amount, payment_date, notes)
-                VALUES (?, ?, ?, 'Collection Payment')
-            """, (booking_id, amount_to_receive, today))
+            try:
+                cursor.execute("""
+                    INSERT INTO payments (booking_id, amount, payment_date, notes, request_id)
+                    VALUES (?, ?, ?, 'Collection Payment', ?)
+                """, (booking_id, amount_to_receive, today, data.request_id))
+            except sqlite3.IntegrityError:
+                # A repeated scan/click using the same request id must never
+                # record a duplicate payment.
+                conn.rollback()
+                return get_booking_with_payments(conn, booking_id)
 
         cursor.execute("""
             UPDATE bookings SET
@@ -510,10 +730,14 @@ def add_payment(booking_id: int, data: AddPaymentSchema):
         new_advance = round(old_advance + data.amount, 2)
         new_balance = round(max(0.0, grand_total - new_advance), 2)
 
-        cursor.execute("""
-            INSERT INTO payments (booking_id, amount, payment_date, notes)
-            VALUES (?, ?, ?, ?)
-        """, (booking_id, data.amount, today, data.notes or "Payment"))
+        try:
+            cursor.execute("""
+                INSERT INTO payments (booking_id, amount, payment_date, notes, request_id)
+                VALUES (?, ?, ?, ?, ?)
+            """, (booking_id, data.amount, today, data.notes or "Payment", data.request_id))
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            return get_booking_with_payments(conn, booking_id)
 
         cursor.execute("""
             UPDATE bookings SET
@@ -581,6 +805,113 @@ def monthly_report(year: int = Query(...), month: int = Query(...)):
 def custom_report(start_date: str = Query(...), end_date: str = Query(...)):
     with get_db() as conn:
         return calculate_report_data(conn, start_date, end_date)
+
+
+REPORT_ORDERS = {
+    "function_date ASC": "function_date ASC, token_number ASC",
+    "function_date DESC": "function_date DESC, token_number ASC",
+    "customer_name ASC": "customer_name ASC, token_number ASC",
+    "customer_name DESC": "customer_name DESC, token_number ASC",
+    "token_number ASC": "token_number ASC, id ASC",
+    "token_number DESC": "token_number DESC, id DESC",
+}
+
+
+def _report_filters(start: str, end: str, search: Optional[str]):
+    conditions = ["function_date >= ? AND function_date <= ?"]
+    params: List[Any] = [start, end]
+    if search and search.strip():
+        q = f"%{search.strip()}%"
+        conditions.append("(token_number LIKE ? OR customer_name LIKE ? OR phone LIKE ? OR village LIKE ?)")
+        params.extend([q, q, q, q])
+    return " AND ".join(conditions), params
+
+
+def query_report_bookings(
+    conn: sqlite3.Connection,
+    start: str,
+    end: str,
+    order_by: Optional[str],
+    search: Optional[str],
+) -> List[Dict[str, Any]]:
+    cursor = conn.cursor()
+    where_clause, params = _report_filters(start, end, search)
+    order_clause = "ORDER BY " + REPORT_ORDERS.get(order_by or "", "token_number ASC, id ASC")
+    cursor.execute(f"SELECT * FROM bookings WHERE {where_clause} {order_clause}", params)
+    return [row_to_dict(r) for r in cursor.fetchall()]
+
+
+def opening_balance(conn: sqlite3.Connection, start: str, search: Optional[str]) -> float:
+    """Outstanding balance brought forward from records before the period."""
+    cursor = conn.cursor()
+    conditions = ["function_date < ?"]
+    params: List[Any] = [start]
+    if search and search.strip():
+        q = f"%{search.strip()}%"
+        conditions.append("(token_number LIKE ? OR customer_name LIKE ? OR phone LIKE ? OR village LIKE ?)")
+        params.extend([q, q, q, q])
+    cursor.execute(
+        f"SELECT COALESCE(SUM(balance), 0) AS bal FROM bookings WHERE {' AND '.join(conditions)}",
+        params,
+    )
+    return round(float(cursor.fetchone()["bal"]), 2)
+
+
+@app.get("/api/reports/pdf")
+def report_pdf(
+    start_date: str = Query(...),
+    end_date: str = Query(...),
+    order_by: Optional[str] = None,
+    search: Optional[str] = None,
+    label: Optional[str] = None,
+):
+    try:
+        start = parse_iso_date(start_date, "Start date")
+        end = parse_iso_date(end_date, "End date")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if start is None or end is None:
+        raise HTTPException(status_code=400, detail="start_date and end_date are required")
+    if end < start:
+        raise HTTPException(status_code=400, detail="End date cannot be earlier than the start date")
+
+    start_s = start.strftime("%Y-%m-%d")
+    end_s = end.strftime("%Y-%m-%d")
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM settings WHERE id = 1")
+        settings_row = cursor.fetchone()
+        settings = row_to_dict(settings_row) if settings_row else {}
+        bookings = query_report_bookings(conn, start_s, end_s, order_by, search)
+        opening = opening_balance(conn, start_s, search)
+
+    totals = {
+        "count": len(bookings),
+        "total": round(sum(float(b["grand_total"]) for b in bookings), 2),
+        "paid": round(sum(float(b["advance_paid"]) for b in bookings), 2),
+        "balance": round(sum(float(b["balance"]) for b in bookings), 2),
+        "mutton": round(sum(float(b["mutton_qty"]) for b in bookings), 2),
+        "chicken": round(sum(float(b["chicken_qty"]) for b in bookings), 2),
+    }
+
+    pdf_bytes = build_report_pdf(
+        settings=settings,
+        title=(label or "Collection Report").strip() or "Collection Report",
+        start_date=start_s,
+        end_date=end_s,
+        bookings=bookings,
+        opening_balance=opening,
+        totals=totals,
+        generated_at=datetime.now().strftime("%d-%m-%Y %I:%M %p"),
+        search=search,
+    )
+    filename = f"collection_report_{start_s}_to_{end_s}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
 
 
 # --- Static and Root Endpoints ---

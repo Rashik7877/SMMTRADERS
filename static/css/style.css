@@ -5,6 +5,7 @@
     --primary-light: #166534;
     --primary-dark: #0F3A1E;
     --primary-bg: #ECFDF5;
+    --navy: #0F2A47;
     --accent: #FBBF24;
     --accent-light: #FCD34D;
     --accent-bg: #FFFBEB;
@@ -65,6 +66,12 @@ body {
 
 @media (min-width: 1280px) {
     .app-container { max-width: 1100px; }
+}
+
+/* The Scan Collection terminal is a desktop-first workspace: give it the
+   full usable width while every other page keeps its reading width. */
+@media (min-width: 1024px) {
+    .app-container.wide { max-width: 1440px; }
 }
 
 /* ─── Header ─────────────────────────────────────────────── */
@@ -256,6 +263,31 @@ body {
 
 .btn-back svg { width: 20px; height: 20px; }
 
+.btn-back-label {
+    width: auto;
+    padding: 0 16px;
+    gap: 8px;
+    font-size: 0.92rem;
+    font-weight: 600;
+    font-family: var(--font);
+    color: var(--text);
+    flex-shrink: 0;
+}
+
+.btn-back-label:hover { background: var(--border-light); color: var(--text); }
+
+.page-header-hint {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    background: var(--border-light);
+    border: 1px solid var(--border);
+    padding: 6px 12px;
+    border-radius: 999px;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
 /* ─── Form Styles ──────────────────────────────────────────── */
 
 .form-section {
@@ -317,6 +349,32 @@ body {
 }
 
 .form-input::placeholder { color: var(--text-light); }
+
+.field-error {
+    display: none;
+    margin-top: 6px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--danger);
+}
+
+.field-error.visible {
+    display: block;
+}
+
+.form-input.input-error,
+.form-select.input-error,
+.form-textarea.input-error {
+    border-color: var(--danger);
+    box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.12);
+}
+
+.field-hint {
+    display: block;
+    margin-top: 6px;
+    font-size: 0.78rem;
+    color: var(--text-light);
+}
 
 .form-textarea {
     min-height: 80px;
@@ -762,6 +820,80 @@ body {
     justify-content: center;
 }
 
+/* Rendered calendar cells (class names emitted by renderCalendar) */
+
+.cal-header {
+    text-align: center;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-light);
+    padding: 8px 0;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.cal-day {
+    position: relative;
+    aspect-ratio: 1 / 1;
+    min-height: 40px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: var(--text);
+    cursor: pointer;
+    transition: var(--transition);
+    user-select: none;
+}
+
+.cal-day:hover {
+    background: var(--border-light);
+}
+
+.cal-day-num {
+    line-height: 1;
+}
+
+.cal-day-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 999px;
+    background: var(--primary);
+    color: #fff;
+    font-size: 0.6rem;
+    font-weight: 700;
+    line-height: 1;
+}
+
+.cal-day-pending .cal-day-count {
+    background: var(--danger);
+}
+
+.cal-day-empty {
+    cursor: default;
+    pointer-events: none;
+}
+
+.cal-day-today {
+    border-color: var(--primary);
+    font-weight: 700;
+    color: var(--primary);
+}
+
+.cal-day-today .cal-day-num {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+}
+
 /* ─── Production Summary ───────────────────────────────────── */
 
 .production-summary {
@@ -1109,36 +1241,65 @@ body {
 
 .scan-waiting {
     text-align: center;
-    padding: 60px 20px;
+    padding: 32px 20px 36px;
     animation: fadeIn 0.5s ease;
+    background: var(--card-bg);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+}
+
+.scan-ready {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--success);
+    background: var(--success-bg);
+    border: 1px solid rgba(5, 150, 105, 0.3);
+    padding: 6px 14px;
+    border-radius: 999px;
+    margin-bottom: 18px;
+}
+
+.scan-ready-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 0 3px rgba(5, 150, 105, 0.2);
 }
 
 .scan-icon {
-    font-size: 4rem;
-    margin-bottom: 20px;
+    font-size: 3.2rem;
+    margin-bottom: 12px;
     opacity: 0.8;
 }
 
 .scan-waiting h3 {
-    font-size: 1.3rem;
-    font-weight: 700;
-    margin-bottom: 8px;
-    color: var(--text);
+    font-size: 1.5rem;
+    font-weight: 800;
+    margin-bottom: 6px;
+    color: var(--navy);
+    letter-spacing: -0.02em;
 }
 
 .scan-waiting p {
     color: var(--text-secondary);
-    margin-bottom: 24px;
-    font-size: 0.95rem;
+    margin-bottom: 20px;
+    font-size: 1rem;
 }
 
 .scan-input {
     width: 100%;
-    max-width: 400px;
-    padding: 18px 24px;
+    max-width: 560px;
+    padding: 20px 24px;
     border: 2px solid var(--primary);
     border-radius: var(--radius);
-    font-size: 1.3rem;
+    font-size: 1.5rem;
     font-family: var(--font);
     text-align: center;
     color: var(--text);
@@ -1153,49 +1314,763 @@ body {
     box-shadow: 0 0 0 6px rgba(20, 83, 45, 0.15);
 }
 
+.scan-waiting-hint {
+    margin-top: 16px;
+    margin-bottom: 0 !important;
+    font-size: 0.85rem !important;
+    color: var(--text-light) !important;
+}
+
+.scan-waiting-hint kbd {
+    display: inline-block;
+    padding: 1px 7px;
+    border: 1px solid var(--border);
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    background: var(--border-light);
+    font-family: var(--font);
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: var(--text-secondary);
+}
+
 .scan-result {
     animation: fadeIn 0.3s ease;
-}
-
-.scan-preview {
-    background: var(--card-bg);
-    border-radius: var(--radius);
-    padding: 20px;
-    box-shadow: var(--shadow);
-    border: 1px solid var(--border-light);
-}
-
-.scan-preview-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 16px;
-    padding-bottom: 12px;
-    border-bottom: 2px solid var(--border-light);
-}
-
-.scan-balance-due {
-    background: var(--accent-bg);
-    border-radius: var(--radius-sm);
-    padding: 16px;
-    margin-top: 12px;
-    border: 1px solid rgba(251, 191, 36, 0.3);
-}
-
-.scan-already {
-    display: flex;
-    align-items: flex-start;
-    gap: 12px;
-    background: var(--danger-bg);
-    border-radius: var(--radius-sm);
-    padding: 16px;
-    margin-top: 12px;
-    border: 1px solid rgba(220, 38, 38, 0.2);
 }
 
 .scan-alert-icon {
     font-size: 1.5rem;
     flex-shrink: 0;
+}
+
+/* ─── Scan booking panel (wide terminal layout) ───────────── */
+
+.sc-panel {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+}
+
+.sc-panel-error {
+    padding: 22px;
+}
+
+.sc-error-body {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    background: var(--danger-bg);
+    border: 1px solid rgba(220, 38, 38, 0.25);
+    border-radius: var(--radius-sm);
+    padding: 18px;
+}
+
+.sc-error-body strong {
+    display: block;
+    font-size: 1.15rem;
+    font-weight: 800;
+    color: #991B1B;
+}
+
+.sc-error-body p {
+    font-size: 0.95rem;
+    color: var(--text-secondary);
+    margin-top: 6px;
+    margin-bottom: 0;
+}
+
+.sc-error-hint {
+    font-size: 0.85rem !important;
+}
+
+/* A. Customer and booking header */
+
+.sc-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 20px;
+    padding: 18px 22px;
+    background: #F8FAFC;
+    border-radius: var(--radius) var(--radius) 0 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.sc-header-main { min-width: 0; }
+
+.sc-title-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.sc-customer-name {
+    font-size: clamp(1.45rem, 1.9vw, 1.9rem);
+    font-weight: 800;
+    color: var(--navy);
+    letter-spacing: -0.02em;
+    line-height: 1.15;
+    word-break: break-word;
+    margin: 0;
+}
+
+.sc-badges {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.sc-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 28px;
+    margin-top: 14px;
+}
+
+.sc-meta-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.sc-meta-label {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--text-secondary);
+}
+
+.sc-meta-value {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.sc-meta-sub {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.sc-token {
+    font-weight: 800;
+    color: var(--primary);
+    letter-spacing: 0.04em;
+}
+
+.sc-header-actions { flex-shrink: 0; }
+
+/* Shared section shell */
+
+.sc-section {
+    padding: 16px 22px;
+    border-top: 1px solid var(--border-light);
+}
+
+.sc-section-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+
+.sc-section-head h3 {
+    font-size: 0.8rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--navy);
+    margin: 0;
+}
+
+.sc-section-note {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--text-light);
+}
+
+/* B. Order quantities table */
+
+.sc-items-wrap {
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+.sc-items-table {
+    width: 100%;
+    min-width: 560px;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: 1rem;
+}
+
+.sc-items-table th {
+    text-align: left;
+    font-size: 0.76rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--navy);
+    background: #EEF2F7;
+    padding: 10px 12px;
+    border-bottom: 2px solid var(--border);
+    white-space: nowrap;
+}
+
+.sc-items-table th.num,
+.sc-items-table td.num { text-align: right; }
+
+.sc-items-table td {
+    padding: 12px;
+    border-bottom: 1px solid var(--border-light);
+    color: var(--text);
+    font-weight: 500;
+    vertical-align: middle;
+}
+
+.sc-items-table tbody tr:last-child td { border-bottom: none; }
+
+.sc-item-name {
+    font-size: 1.02rem;
+    font-weight: 700;
+    color: var(--navy);
+}
+
+.sc-item-qty {
+    font-size: 1.1rem;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+}
+
+.sc-item-unit {
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.sc-item-amount {
+    font-weight: 700;
+}
+
+.sc-item-notes,
+.sc-items-table td.sc-item-notes { color: var(--text-light); }
+
+.sc-items-empty {
+    text-align: center;
+    color: var(--text-light);
+    padding: 20px 12px !important;
+}
+
+.sc-items-notes {
+    margin-top: 10px;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    background: var(--border-light);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    padding: 8px 12px;
+}
+
+/* C. Payment summary */
+
+.sc-summary {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 12px;
+}
+
+.sc-sum-tile {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+    padding: 14px 16px;
+    background: #F8FAFC;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+}
+
+.sc-sum-label {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-secondary);
+}
+
+.sc-sum-value {
+    font-size: 1.6rem;
+    font-weight: 800;
+    color: var(--navy);
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+    font-variant-numeric: tabular-nums;
+    word-break: break-word;
+}
+
+.sc-sum-note {
+    font-size: 0.76rem;
+    font-weight: 600;
+    color: var(--text-light);
+}
+
+.sc-sum-paid {
+    background: var(--success-bg);
+    border-color: rgba(5, 150, 105, 0.4);
+}
+.sc-sum-paid .sc-sum-label { color: #065F46; }
+.sc-sum-paid .sc-sum-value { color: #047857; }
+
+.sc-sum-due {
+    background: var(--danger-bg);
+    border: 2px solid rgba(220, 38, 38, 0.5);
+    padding: 13px 15px;
+}
+.sc-sum-due .sc-sum-label { color: #991B1B; }
+.sc-sum-due .sc-sum-value { color: var(--danger); font-size: 2rem; }
+.sc-sum-due .sc-sum-note { color: #991B1B; }
+
+.sc-sum-cleared {
+    background: var(--success-bg);
+    border: 2px solid rgba(5, 150, 105, 0.5);
+    padding: 13px 15px;
+}
+.sc-sum-cleared .sc-sum-label { color: #065F46; }
+.sc-sum-cleared .sc-sum-value { color: #047857; font-size: 2rem; }
+.sc-sum-cleared .sc-sum-note { color: #065F46; }
+
+/* D. Collection action panel */
+
+.sc-action-section { background: #FCFCFB; }
+
+.sc-action-row {
+    display: flex;
+    align-items: flex-end;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.sc-action-row-center {
+    justify-content: center;
+    margin-top: 16px;
+}
+
+.sc-action-field {
+    flex: 1 1 240px;
+    max-width: 340px;
+    min-width: 200px;
+    margin-bottom: 0;
+}
+
+.sc-amount-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.sc-amount-symbol {
+    position: absolute;
+    left: 16px;
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: var(--text-secondary);
+    pointer-events: none;
+}
+
+.sc-amount-input {
+    width: 100%;
+    padding: 15px 16px 15px 42px;
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--navy);
+    font-variant-numeric: tabular-nums;
+    min-height: 58px;
+    -moz-appearance: textfield;
+    appearance: textfield;
+}
+
+.sc-amount-input::-webkit-outer-spin-button,
+.sc-amount-input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+.sc-action-side {
+    flex: 1 1 340px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+.sc-after-balance {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.sc-after-label {
+    font-size: 0.74rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-secondary);
+}
+
+.sc-after-value {
+    font-size: 1.4rem;
+    font-weight: 800;
+    color: var(--navy);
+    font-variant-numeric: tabular-nums;
+    word-break: break-word;
+}
+
+.sc-action-buttons {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.sc-confirm {
+    padding: 17px 30px;
+    font-size: 1.1rem;
+    min-height: 56px;
+}
+
+.sc-notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 14px 16px;
+    border-radius: var(--radius-sm);
+    margin-bottom: 14px;
+}
+
+.sc-notice:last-child { margin-bottom: 0; }
+
+.sc-notice-icon {
+    font-size: 1.1rem;
+    font-weight: 800;
+    line-height: 1.4;
+}
+
+.sc-notice strong {
+    display: block;
+    font-size: 1.02rem;
+    font-weight: 800;
+}
+
+.sc-notice p {
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    margin-top: 4px;
+    margin-bottom: 0;
+}
+
+.sc-notice-done {
+    background: var(--accent-bg);
+    border: 1px solid rgba(251, 191, 36, 0.55);
+    color: #92400E;
+}
+
+.sc-notice-paid {
+    background: var(--success-bg);
+    border: 1px solid rgba(5, 150, 105, 0.4);
+    color: #065F46;
+}
+
+
+/* ─── Scan Collection Table ────────────────────────────────── */
+
+.scan-table-section {
+    margin-top: 24px;
+}
+
+.scan-table-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+}
+
+.scan-table-title {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--navy);
+    margin: 0;
+}
+
+.scan-table-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.scan-table-controls .form-select {
+    width: auto;
+    padding: 10px 14px;
+    font-size: 0.9rem;
+}
+
+.scan-table-loading {
+    text-align: center;
+    padding: 20px;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.scan-table-done {
+    color: var(--success);
+    font-weight: 700;
+    font-size: 0.9rem;
+}
+
+/* ─── Responsive Data Tables ───────────────────────────────── */
+
+.table-responsive {
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    background: var(--card-bg);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-light);
+    box-shadow: var(--shadow);
+}
+
+/* Collection records can be longer than the viewport: scroll inside the
+   panel so the sticky heading stays visible while scanning rows. */
+.scan-table-section .table-responsive {
+    max-height: min(58vh, 620px);
+    overflow-y: auto;
+}
+
+.scan-data-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: 0.95rem;
+    text-align: left;
+    white-space: nowrap;
+}
+
+.scan-data-table th {
+    background: #F1F5F9;
+    color: var(--navy);
+    font-weight: 700;
+    padding: 12px 14px;
+    border-bottom: 2px solid var(--border);
+    text-transform: uppercase;
+    font-size: 0.75rem;
+    letter-spacing: 0.04em;
+    position: sticky;
+    top: 0;
+    z-index: 2;
+}
+
+.scan-data-table td {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border-light);
+    color: var(--text);
+}
+
+.scan-data-table th.num,
+.scan-data-table td.num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.scan-data-table td.num { font-weight: 600; }
+
+.scan-data-table tr:hover {
+    background: rgba(20, 83, 45, 0.03);
+}
+
+.scan-data-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.scan-row-collected {
+    background: rgba(5, 150, 105, 0.04);
+}
+
+.scan-row-collected td {
+    color: var(--text-secondary);
+}
+
+.scan-row-collected td.num { color: var(--text-secondary); }
+
+@media (max-width: 640px) {
+    .table-responsive {
+        overflow: visible;
+        max-height: none;
+        border: none;
+        box-shadow: none;
+        background: transparent;
+    }
+    .scan-data-table {
+        white-space: normal;
+        font-size: 0.95rem;
+    }
+    .scan-data-table thead {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        border: 0;
+    }
+    .scan-data-table tbody tr {
+        display: block;
+        background: var(--card-bg);
+        border: 1px solid var(--border-light);
+        border-radius: var(--radius-sm);
+        box-shadow: var(--shadow-sm);
+        margin-bottom: 12px;
+        padding: 8px 12px;
+    }
+    .scan-data-table tr:hover { background: var(--card-bg); }
+    .scan-row-collected { background: var(--card-bg) !important; }
+    .scan-data-table td {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 6px 0;
+        border-bottom: 1px solid var(--border-light);
+        text-align: right;
+    }
+    .scan-data-table tbody tr td:last-child { border-bottom: none; }
+    .scan-data-table td::before {
+        content: attr(data-label);
+        font-weight: 700;
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: var(--text-light);
+        text-align: left;
+        flex-shrink: 0;
+    }
+    .scan-data-table td[data-label="Action"] {
+        justify-content: flex-end;
+    }
+    .scan-data-table td[data-label="Action"]::before {
+        margin-right: auto;
+    }
+}
+
+/* ─── Scan panel responsiveness ────────────────────────────── */
+
+@media (min-width: 768px) {
+    .sc-summary { grid-template-columns: 1fr 1fr; }
+}
+
+@media (min-width: 960px) {
+    .sc-summary { grid-template-columns: 1fr 1fr 1.25fr; }
+}
+
+@media (max-width: 767px) {
+    .sc-header {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 14px;
+        padding: 16px;
+        border-radius: var(--radius) var(--radius) 0 0;
+    }
+    .sc-header-actions .btn { width: 100%; }
+    .sc-customer-name { font-size: 1.4rem; }
+    .sc-section { padding: 14px 16px; }
+    .sc-action-field { max-width: none; flex-basis: 100%; }
+    .sc-action-side { flex-basis: 100%; flex-direction: column; align-items: stretch; }
+    .sc-after-balance {
+        flex-direction: row;
+        align-items: baseline;
+        justify-content: space-between;
+        background: var(--card-bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        padding: 10px 14px;
+    }
+    .sc-action-buttons { width: 100%; }
+    .sc-action-buttons .btn { flex: 1 1 auto; }
+    .sc-confirm { width: 100%; }
+    .sc-sum-due .sc-sum-value,
+    .sc-sum-cleared .sc-sum-value { font-size: 1.75rem; }
+}
+
+@media (max-width: 640px) {
+    .sc-items-table { min-width: 520px; }
+    .scan-waiting { padding: 24px 14px 28px; }
+    .scan-waiting h3 { font-size: 1.25rem; }
+    .scan-input { font-size: 1.2rem; padding: 16px 18px; }
+    .page-header-hint { display: none; }
+}
+
+/* ─── Custom Range Row ─────────────────────────────────────── */
+
+.custom-range-row {
+    display: flex;
+    align-items: flex-end;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+    padding: 14px 16px;
+    background: var(--card-bg);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-sm);
+}
+
+.custom-range-row .form-group {
+    margin-bottom: 0;
+    flex: 1 1 160px;
+}
+
+/* ─── Report Period Note ───────────────────────────────────── */
+
+.report-period-note {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+}
+
+.badge-custom,
+.badge-configured {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.badge-custom {
+    background: var(--accent-bg);
+    color: #92400E;
+    border: 1px solid rgba(251, 191, 36, 0.5);
+}
+
+.badge-configured {
+    background: var(--primary-bg);
+    color: var(--primary);
+    border: 1px solid rgba(20, 83, 45, 0.2);
 }
 
 /* ─── Report Table ─────────────────────────────────────────── */

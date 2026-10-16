@@ -1,9 +1,10 @@
-import os
 import random
 import sqlite3
 from datetime import datetime, timedelta
 
 DB_PATH = "smm_traders.db"
+COLLECTION_DATE = "2026-12-25"
+COLLECTION_TIME = "12:00"
 
 FIRST_NAMES = [
     "Mohamed", "Hameed", "Ibrahim", "Meeran", "Syed", "Abdul", "Rahman", "Jafar",
@@ -32,54 +33,37 @@ def seed_database():
     conn.execute("PRAGMA foreign_keys = ON")
     cursor = conn.cursor()
 
-    # Get settings for item prices
     cursor.execute("SELECT mutton_biriyani_price, chicken_65_price FROM settings WHERE id = 1")
     setting = cursor.fetchone()
     mutton_price = float(setting[0]) if setting else 2500.0
     chicken_price = float(setting[1]) if setting else 350.0
 
-    # Clear existing test data
+    # The fixed collection date is controlled only by Settings.
+    cursor.execute("UPDATE settings SET collection_date = ?, collection_time = ? WHERE id = 1", (COLLECTION_DATE, COLLECTION_TIME))
+
     cursor.execute("DELETE FROM payments")
     cursor.execute("DELETE FROM bookings")
 
-    random.seed(42)  # For reproducible realistic data
-
+    random.seed(42)
     today = datetime(2026, 10, 13)
-    bookings_to_insert = []
-    payments_to_insert = []
 
-    mutton_options = [round(x * 0.25, 2) for x in range(4, 33)]  # 1.00 Padi up to 8.00 Padi
-    chicken_options = [round(x * 0.25, 2) for x in range(1, 21)]  # 0.25 Kg up to 5.00 Kg
+    mutton_options = [round(x * 0.25, 2) for x in range(4, 33)]
+    chicken_options = [round(x * 0.25, 2) for x in range(1, 21)]
 
     for i in range(1, 201):
         token_number = f"SMM{i:04d}"
         cust_name = f"{random.choice(FIRST_NAMES)} {random.choice(LAST_NAMES)}"
         phone = f"9{random.randint(100000000, 999999999)}"
         village = random.choice(VILLAGES)
-        
-        # Booking date between 1 and 20 days ago
         b_offset = random.randint(1, 20)
         b_date = (today - timedelta(days=b_offset)).strftime("%Y-%m-%d")
-        
-        # Function date between 5 days ago and 25 days in future
-        f_offset = random.randint(-5, 25)
-        f_date = (today + timedelta(days=f_offset)).strftime("%Y-%m-%d")
-        pickup_time = random.choice(TIMES)
-        
+        pickup_time = COLLECTION_TIME
         m_qty = random.choice(mutton_options)
         c_qty = random.choice(chicken_options)
-        
         grand_total = round(m_qty * mutton_price + c_qty * chicken_price, 2)
-        
-        # Determine status and payments
-        # If function date was in the past, high chance it's collected
-        if f_offset < 0:
-            status = random.choice(["collected", "collected", "pending"])
-        else:
-            status = "collected" if random.random() < 0.25 else "pending"
-        
+        status = random.choice(["collected", "collected", "pending"])
+
         if status == "collected":
-            # Collected: mostly fully paid, occasionally with tiny balance
             if random.random() < 0.85:
                 advance_paid = grand_total
                 balance = 0.0
@@ -87,15 +71,14 @@ def seed_database():
                 advance_paid = round(grand_total * 0.8, 2)
                 balance = round(grand_total - advance_paid, 2)
         else:
-            # Pending: advance paid between 10% and 60% rounded to nearest 100 or 500
             pct = random.choice([0.15, 0.25, 0.35, 0.5, 0.6])
             adv_raw = grand_total * pct
             advance_paid = round(adv_raw / 100) * 100.0
             advance_paid = min(advance_paid, grand_total)
             balance = round(grand_total - advance_paid, 2)
-        
+
         notes = random.choice(["", "", "", "Extra spicy", "Less oil", "Wedding order", "Birthday party", "Deliver packing hot", "Family gathering"])
-        
+
         cursor.execute("""
             INSERT INTO bookings (
                 token_number, customer_name, phone, village,
@@ -104,35 +87,19 @@ def seed_database():
                 chicken_qty, chicken_price_per_kg,
                 grand_total, advance_paid, balance,
                 status, notes
-            ) VALUES (
-                ?, ?, ?, ?,
-                ?, ?, ?,
-                ?, ?,
-                ?, ?,
-                ?, ?, ?,
-                ?, ?
-            )
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             token_number, cust_name, phone, village,
-            b_date, f_date, pickup_time,
-            m_qty, mutton_price,
-            c_qty, chicken_price,
-            grand_total, advance_paid, balance,
-            status, notes
+            b_date, COLLECTION_DATE, pickup_time,
+            m_qty, mutton_price, c_qty, chicken_price,
+            grand_total, advance_paid, balance, status, notes
         ))
         booking_id = cursor.lastrowid
-        
-        # Insert initial advance payment if any
         if advance_paid > 0:
             cursor.execute("""
                 INSERT INTO payments (booking_id, amount, payment_date, notes)
                 VALUES (?, ?, ?, 'Advance Payment')
             """, (booking_id, advance_paid, b_date))
-            
-            # If collected and had a second payment on collection day
-            if status == "collected" and balance == 0.0 and advance_paid > 0 and random.random() < 0.4:
-                # Split into advance and collection payment
-                pass
 
     conn.commit()
     cursor.execute("SELECT COUNT(*), SUM(grand_total), SUM(advance_paid), SUM(balance), SUM(mutton_qty), SUM(chicken_qty) FROM bookings")

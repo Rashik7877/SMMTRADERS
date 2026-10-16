@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>SM MOIDEEN TRADERS</title>
-<link rel="stylesheet" href="/static/css/style.css">
+<link rel="stylesheet" href="/static/css/style.css?v=3">
 </head>
 <body>
 <div class="app-container" id="app">
@@ -75,7 +75,8 @@
         </div>
         <div class="form-group">
           <label class="form-label" for="customer-phone">Phone Number *</label>
-          <input type="tel" class="form-input form-input-lg" id="customer-phone" placeholder="Enter phone number" required autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+          <input type="tel" class="form-input form-input-lg" id="customer-phone" inputmode="numeric" maxlength="10" placeholder="10-digit mobile number" required autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" oninput="sanitizePhoneInput(this); clearFieldError('phone-error')">
+          <span class="field-error" id="phone-error" role="alert"></span>
         </div>
         <div class="form-group">
           <label class="form-label" for="customer-village">Village / Area</label>
@@ -98,12 +99,14 @@
         </div>
         <div class="form-row">
           <div class="form-group">
-            <label class="form-label" for="function-date">Collection Date *</label>
-            <input type="date" class="form-input form-input-lg" id="function-date" required autocomplete="off">
+          <label class="form-label" for="function-date">Collection Date *</label>
+          <input type="text" class="form-input form-input-static" id="function-date" placeholder="Set in Settings" readonly>
+          <span class="field-hint" id="collection-default-hint"></span>
           </div>
           <div class="form-group">
             <label class="form-label" for="pickup-time">Collection Time</label>
-            <input type="time" class="form-input" id="pickup-time" autocomplete="off">
+            <input type="text" class="form-input form-input-static" id="pickup-time" placeholder="Set in Settings" readonly>
+            <span class="field-hint" id="collection-time-hint"></span>
           </div>
         </div>
       </div>
@@ -221,7 +224,7 @@
       <h2>Upcoming Bookings</h2>
     </div>
     <div class="filter-group" id="upcoming-filters">
-      <button class="filter-btn active" data-filter="season" onclick="filterUpcoming('season')">Current Season</button>
+      <button class="filter-btn active" data-filter="season" onclick="filterUpcoming('season')">Financial Year</button>
       <button class="filter-btn" data-filter="pending" onclick="filterUpcoming('pending')">Pending Collection</button>
       <button class="filter-btn" data-filter="collected" onclick="filterUpcoming('collected')">Collected</button>
       <button class="filter-btn" data-filter="all" onclick="filterUpcoming('all')">All</button>
@@ -230,7 +233,7 @@
       <span class="search-icon" style="left:12px;">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
       </span>
-      <input type="search" class="search-input" id="upcoming-search" placeholder="Filter by name, phone or token..." style="padding:10px 10px 10px 42px;font-size:0.9rem;" autocomplete="off" oninput="filterUpcoming()">
+      <input type="search" class="search-input" id="upcoming-search" placeholder="Filter by name, phone or token..." style="padding:10px 10px 10px 42px;font-size:0.9rem;" autocomplete="off" oninput="onUpcomingSearch()">
     </div>
     <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
       <label style="font-size:0.85rem;color:var(--text-secondary);">Sort:</label>
@@ -269,26 +272,75 @@
       <span id="pending-count" class="status-badge pending" style="font-size:0.85rem;">0</span>
       <button class="btn btn-accent btn-sm" onclick="downloadCSV('pending')">Export CSV</button>
     </div>
+    <div class="search-container">
+      <span class="search-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+      </span>
+      <input type="search" class="search-input" id="pending-search" placeholder="Search by name, phone, token..." oninput="onPendingSearch()" autocomplete="off">
+    </div>
     <div id="pending-list"></div>
   </section>
 
   <!-- ==================== SCAN COLLECTION ==================== -->
   <section id="page-scan-collection" class="page-section">
     <div class="page-header">
-      <button class="btn-back" onclick="showPage('dashboard')">
+      <button class="btn-back btn-back-label" onclick="showPage('dashboard')" title="Back to dashboard">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+        <span>Back</span>
       </button>
       <h2>Scan Collection</h2>
-      <span style="font-size:0.75rem;color:var(--text-light);">ESC: Exit &middot; F2: Focus</span>
+      <span class="page-header-hint">ESC: Exit &middot; F2: Focus Scanner</span>
     </div>
-    <div id="scan-container">
+    <div id="scan-container" class="scan-container">
       <div id="scan-waiting" class="scan-waiting">
+        <span class="scan-ready"><span class="scan-ready-dot"></span>Ready for next customer</span>
         <div class="scan-icon">&#x1F4F7;</div>
         <h3>Scan Customer Receipt</h3>
-        <p>Waiting for barcode...</p>
+        <p>Waiting for barcode (format: S M M &lt;number&gt;)...</p>
         <input type="text" id="scan-input" class="scan-input" placeholder="Scan barcode here..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+        <p class="scan-waiting-hint">Point the scanner at the receipt QR code. Press <kbd>F2</kbd> to refocus &middot; <kbd>Esc</kbd> to exit.</p>
       </div>
       <div id="scan-result" class="scan-result" style="display:none;"></div>
+    </div>
+
+    <div class="scan-table-section" id="scan-records-section">
+      <div class="scan-table-toolbar">
+        <h3 class="scan-table-title">Collection Records</h3>
+        <div class="scan-table-controls">
+          <select class="form-select" id="scan-table-filter" onchange="renderScanTable()">
+            <option value="all">All Records</option>
+            <option value="pending">Pending Collection</option>
+            <option value="collected">Collected</option>
+          </select>
+          <button class="btn btn-secondary btn-sm" onclick="loadScanTable()">Refresh</button>
+        </div>
+      </div>
+      <div id="scan-table-loading" class="loading" style="display:none;"><div class="spinner"></div>Loading records...</div>
+      <div class="table-responsive" id="scan-table-wrapper">
+        <table class="data-table scan-data-table" id="scan-table">
+          <thead>
+            <tr>
+              <th>Booking ID</th>
+              <th>Customer</th>
+              <th>Phone</th>
+              <th>Items</th>
+              <th class="num">Quantity</th>
+              <th class="num">Total Amount</th>
+              <th class="num">Paid</th>
+              <th class="num">Remaining</th>
+              <th>Status</th>
+              <th>Collection Date</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="scan-table-body"></tbody>
+        </table>
+      </div>
+      <div id="scan-table-empty" class="empty-state" style="display:none;">
+        <div class="empty-icon">&#x1F4CB;</div>
+        <h3>No records found</h3>
+        <p id="scan-table-empty-text">No bookings match the current filter.</p>
+      </div>
     </div>
   </section>
 
@@ -301,10 +353,22 @@
       <h2>Reports</h2>
     </div>
     <div class="filter-group" id="report-filters">
-      <button class="filter-btn active" onclick="loadReport('season')">Current Season</button>
+      <button class="filter-btn active" onclick="loadReport('season')">Financial Year</button>
       <button class="filter-btn" onclick="dailyReport()">Daily</button>
       <button class="filter-btn" onclick="weeklyReport()">Weekly</button>
       <button class="filter-btn" onclick="monthlyReport()">Monthly</button>
+      <button class="filter-btn" onclick="loadReport('custom')">Custom Range</button>
+    </div>
+    <div id="custom-range-row" class="custom-range-row" style="display:none;">
+      <div class="form-group">
+        <label class="form-label" for="custom-start">From</label>
+        <input type="date" class="form-input" id="custom-start">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="custom-end">To</label>
+        <input type="date" class="form-input" id="custom-end">
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="applyCustomRange()">Apply</button>
     </div>
     <div id="report-content"></div>
   </section>
@@ -350,18 +414,36 @@
           <div class="form-group">
             <label class="form-label" for="setting-collection-date">Default Collection Date</label>
             <input type="date" class="form-input form-input-lg" id="setting-collection-date" autocomplete="off">
+            <span class="field-hint">Used for every new booking. The booking form cannot change it.</span>
           </div>
           <div class="form-group">
             <label class="form-label" for="setting-collection-time">Default Collection Time</label>
             <input type="time" class="form-input form-input-lg" id="setting-collection-time" autocomplete="off">
+            <span class="field-hint">Used for every new booking. The booking form cannot change it.</span>
           </div>
         </div>
+      </div>
+      <div class="form-section">
+        <div class="form-section-title">Financial / Reporting Period</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label" for="setting-fin-start">Period Start Date</label>
+            <input type="date" class="form-input form-input-lg" id="setting-fin-start" autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="setting-fin-end">Period End Date</label>
+            <input type="date" class="form-input form-input-lg" id="setting-fin-end" autocomplete="off">
+          </div>
+        </div>
+        <span class="field-error" id="financial-period-error" role="alert"></span>
+        <p class="field-hint" id="financial-period-summary"></p>
       </div>
       <div class="form-section">
         <div class="form-section-title">Receipt</div>
         <div class="form-group">
           <label class="form-label" for="setting-footer">Receipt Footer Message</label>
-          <textarea class="form-textarea" id="setting-footer" rows="2" placeholder="Thank you message..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+          <textarea class="form-textarea" id="setting-footer" rows="2" placeholder="Leave empty for no footer..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+          <span class="field-hint">Only this message is printed on receipts and reports. Leave it empty to print no footer at all.</span>
         </div>
       </div>
       <button type="submit" class="btn btn-primary btn-lg btn-block">Save Settings</button>
@@ -430,7 +512,8 @@
           </div>
           <div class="form-group">
             <label class="form-label">Phone</label>
-            <input type="tel" class="form-input" id="edit-phone" required autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+            <input type="tel" class="form-input" id="edit-phone" inputmode="numeric" maxlength="10" required autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" oninput="sanitizePhoneInput(this); clearFieldError('edit-phone-error')">
+            <span class="field-error" id="edit-phone-error" role="alert"></span>
           </div>
         </div>
         <div class="form-group">
@@ -440,11 +523,11 @@
         <div class="form-row">
           <div class="form-group">
             <label class="form-label">Collection Date</label>
-            <input type="date" class="form-input" id="edit-func-date" required autocomplete="off">
+            <input type="text" class="form-input form-input-static" id="edit-func-date" readonly>
           </div>
           <div class="form-group">
             <label class="form-label">Collection Time</label>
-            <input type="time" class="form-input" id="edit-pickup" autocomplete="off">
+            <input type="text" class="form-input form-input-static" id="edit-pickup" readonly>
           </div>
         </div>
         <div class="form-row">
@@ -474,6 +557,6 @@
 
 </div>
 
-    <script src="/static/js/app.js?v=12"></script>
+    <script src="/static/js/app.js?v=17"></script>
 </body>
 </html>

@@ -4,7 +4,16 @@ let state = {
     calendarDate: new Date(),
     settings: null,
     allUpcomingBookings: [],
+    allScanBookings: [],
     bookingFromPage: 'search-booking',
+    savingBooking: false,
+    savingEdit: false,
+    savingPayment: false,
+    savingSettings: false,
+    collectingBooking: false,
+    scanSubmitting: false,
+    lastScanToken: null,
+    scanPreviewBooking: null,
 };
 
 function $(id) { return document.getElementById(id); }
@@ -184,6 +193,17 @@ function getStatusBadge(status) {
     var labels = { pending: 'Pending', collected: 'Collected', cancelled: 'Cancelled' };
     return '<span class="status-badge ' + status + '"><span class="status-dot"></span>' + (labels[status] || status) + '</span>';
 }
+function formatApiError(detail) {
+    if (!detail) return 'Request failed';
+    if (typeof detail === 'string') return detail;
+    if (Array.isArray(detail)) {
+        return detail.map(function (d) {
+            var loc = (d.loc || []).filter(function (p) { return p !== 'body'; }).join('.');
+            return (d.msg || 'Invalid value') + (loc ? ' (' + loc + ')' : '');
+        }).join(' ');
+    }
+    return String(detail);
+}
 async function api(method, url, body) {
     var opts = { method: method, headers: { 'Content-Type': 'application/json' } };
     if (body && method !== 'GET') opts.body = JSON.stringify(body);
@@ -193,7 +213,7 @@ async function api(method, url, body) {
         var res = await fetch(fetchUrl, opts);
         if (!res.ok) {
             var err = await res.json().catch(function() { return { detail: 'Request failed' }; });
-            throw new Error(err.detail || 'Request failed');
+            throw new Error(formatApiError(err.detail));
         }
         return await res.json();
     } catch (e) {
@@ -206,6 +226,75 @@ function escHtml(s) {
     div.textContent = s || '';
     return div.innerHTML;
 }
+function escJs(s) {
+    return String(s == null ? '' : s)
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\r?\n/g, ' ');
+}
+function setFieldError(id, msg) {
+    var el = $(id);
+    if (!el) return;
+    el.textContent = msg || '';
+    el.style.display = msg ? 'block' : 'none';
+}
+function clearFieldError(id) { setFieldError(id, ''); }
+// Keep phone inputs to digits only, capped at 10, so a 10-digit number is all
+// that can ever be typed or pasted.
+function sanitizePhoneInput(el) {
+    if (!el) return;
+    var digits = String(el.value || '').replace(/\D/g, '');
+    if (digits.length > 10) {
+        if (digits.length === 12 && digits.slice(0, 2) === '91') digits = digits.slice(2);
+        else if (digits.length === 11 && digits.charAt(0) === '0') digits = digits.slice(1);
+    }
+    if (digits.length > 10) digits = digits.slice(-10);
+    if (el.value !== digits) {
+        var atEnd = el.selectionStart === null || el.selectionStart >= el.value.length;
+        el.value = digits;
+        if (atEnd) {
+            try { el.setSelectionRange(digits.length, digits.length); } catch(e) {}
+        }
+    }
+}
+function validatePhone(raw) {
+    var text = String(raw == null ? '' : raw).trim();
+    if (!text) return { ok: false, message: 'Phone number is required.' };
+    var cleaned = text.replace(/\D/g, '');
+    if (/[A-Za-z]/.test(text)) {
+        return { ok: false, message: 'Phone number cannot contain letters.' };
+    }
+    if (cleaned.length === 12 && cleaned.slice(0, 2) === '91') cleaned = cleaned.slice(2);
+    else if (cleaned.length === 11 && cleaned.charAt(0) === '0') cleaned = cleaned.slice(1);
+    if (/^[6-9]\d{9}$/.test(cleaned)) return { ok: true, value: cleaned };
+    return {
+        ok: false,
+        message: 'Enter a valid 10-digit mobile number starting with 6, 7, 8 or 9 (e.g. 9876543210).'
+    };
+}
+function genRequestId() {
+    if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID();
+    return 'req-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+}
+function computedFinancialYear() {
+    var now = new Date();
+    var y = now.getMonth() < 3 ? now.getFullYear() - 1 : now.getFullYear();
+    return { start: y + '-04-01', end: (y + 1) + '-03-31' };
+}
+function getFinancialPeriod() {
+    var s = state.settings || {};
+    var start = s.financial_start_date || '';
+    var end = s.financial_end_date || '';
+    if (/^\d{4}-\d{2}-\d{2}$/.test(start) && /^\d{4}-\d{2}-\d{2}$/.test(end) && end >= start) {
+        return { start: start, end: end, configured: true };
+    }
+    var fallback = computedFinancialYear();
+    fallback.configured = false;
+    return fallback;
+}
 function showPage(page) {
     document.querySelectorAll('.page-section').forEach(function(s) { s.classList.remove('active'); });
     var target = $('page-' + page);
@@ -217,6 +306,9 @@ function showPage(page) {
         reports: 'Reports', settings: 'Settings',
     };
     $('app-title').textContent = titles[page] || 'SM MOIDEEN TRADERS';
+    // The scan terminal needs the full desktop width; the rest of the app keeps
+    // its normal, narrower reading width.
+    $('app').classList.toggle('wide', page === 'scan-collection');
     switch (page) {
         case 'new-booking': initNewBooking(); break;
         case 'search-booking': initSearch(); break;
@@ -245,12 +337,23 @@ async function loadPricesAndDefaults() {
     try {
         var s = await api('GET', '/settings');
         state.settings = s;
-$('display-mutton-price').textContent = formatCurrency(s.mutton_biriyani_price) + ' / Padi';
+        $('display-mutton-price').textContent = formatCurrency(s.mutton_biriyani_price) + ' / Padi';
         $('display-chicken-price').textContent = formatCurrency(s.chicken_65_price) + ' / Kg';
-        $('function-date').value = s.collection_date || todayStr();
-        if (s.collection_time) $('pickup-time').value = s.collection_time;
+        var fixedDate = (s.collection_date || '').trim();
+        $('function-date').value = fixedDate ? formatDate(fixedDate) : '';
+        var fixedTime = (s.collection_time || '').trim();
+        $('pickup-time').value = fixedTime ? fmtTime(fixedTime) : '';
+        var hint = $('collection-default-hint');
+        if (hint) {
+            hint.textContent = fixedDate
+                ? 'Fixed by Settings - change it there, not here.'
+                : 'Not set. Choose the collection date in Settings first.';
+        }
         calcTotals();
-    } catch(e) {}
+        return fixedDate;
+    } catch(e) {
+        return '';
+    }
 }
 
 function calcTotals() {
@@ -271,41 +374,58 @@ function calcTotals() {
 
 async function saveBooking(e) {
     e.preventDefault();
+    if (state.savingBooking) return false;
     var s = state.settings;
     if (!s || (s.mutton_biriyani_price === 0 && s.chicken_65_price === 0)) {
         showToast('Please set item prices in Settings first.', 'error');
-        return;
+        return false;
     }
+    var phoneCheck = validatePhone($('customer-phone').value);
+    if (!phoneCheck.ok) {
+        setFieldError('phone-error', phoneCheck.message);
+        showToast(phoneCheck.message, 'error');
+        $('customer-phone').focus();
+        return false;
+    }
+    clearFieldError('phone-error');
+    var fixedDate = ((state.settings && state.settings.collection_date) || '').trim();
+    if (!fixedDate) {
+        showToast('Set the collection date in Settings before creating a booking.', 'error');
+        return false;
+    }
+    var fixedTime = ((state.settings && state.settings.collection_time) || '').trim();
     var data = {
         customer_name: $('customer-name').value.trim(),
-        phone: $('customer-phone').value.trim(),
+        phone: phoneCheck.value,
         village: $('customer-village').value.trim(),
-        function_date: $('function-date').value,
-        pickup_time: $('pickup-time').value,
+        function_date: fixedDate,
+        pickup_time: fixedTime,
         mutton_qty: parseFloat($('mutton-qty').value) || 0,
         chicken_qty: parseFloat($('chicken-qty').value) || 0,
         advance_paid: parseFloat($('advance-paid').value) || 0,
         notes: $('booking-notes').value.trim(),
     };
-    if (!data.customer_name) { showToast('Please enter customer name.', 'error'); return; }
-    if (!data.phone) { showToast('Please enter phone number.', 'error'); return; }
-    if (!data.function_date) { showToast('Please select collection date.', 'error'); return; }
+    if (!data.customer_name) { showToast('Please enter customer name.', 'error'); return false; }
     if (data.mutton_qty === 0 && data.chicken_qty === 0) {
         showToast('Please order at least one item.', 'error');
-        return;
+        return false;
     }
     if (!isValidQuantityStep(data.mutton_qty)) {
         showToast('Mutton Biriyani quantity must be in steps of 0.25 (e.g. 0.25, 0.50, 0.75, 1.00, 1.25).', 'error');
         $('mutton-qty').focus();
-        return;
+        return false;
     }
     if (!isValidQuantityStep(data.chicken_qty)) {
         showToast('Chicken 65 quantity must be in steps of 0.25 (e.g. 0.25, 0.50, 0.75, 1.00, 1.25).', 'error');
         $('chicken-qty').focus();
-        return;
+        return false;
     }
+    state.savingBooking = true;
+    var submitBtn = document.querySelector('#booking-form button[type="submit"]');
+    if (submitBtn) submitBtn.disabled = true;
     try {
         var booking = await api('POST', '/bookings', data);
+        $('customer-phone').value = phoneCheck.value;
         state.currentBookingId = booking.id;
         state.lastBooking = booking;
         resetBookingForm();
@@ -319,7 +439,11 @@ async function saveBooking(e) {
                 { label: 'Home', cls: 'btn-secondary', action: function() { closeModal('success-modal'); showPage('dashboard'); } }
             ]
         });
-    } catch(e) {}
+    } catch(e) {
+    } finally {
+        state.savingBooking = false;
+        if (submitBtn) submitBtn.disabled = false;
+    }
 }
 
 function resetBookingForm() {
@@ -420,7 +544,7 @@ function renderBookingDetail(b) {
         '<p style="color:var(--text-secondary);font-size:0.9rem;">' + (b.notes || 'No notes') + '</p></div>' +
         '<div class="card-actions" style="margin-top:16px;">' +
         (b.status === 'pending' ? '<button class="btn btn-success btn-lg" onclick="openCollectionModal(' + b.id + ')">Mark as Collected</button>' : '') +
-        '<button class="btn btn-accent btn-lg" onclick="openPaymentModal(' + b.id + ', \'' + escHtml(b.customer_name) + '\', \'' + b.token_number + '\', ' + b.balance + ')">Update Payment</button>' +
+        '<button class="btn btn-accent btn-lg" onclick="openPaymentModal(' + b.id + ', \'' + escJs(b.customer_name) + '\', \'' + b.token_number + '\', ' + b.balance + ')">Update Payment</button>' +
         (b.status === 'collected' ? '<button class="btn btn-success btn-lg" onclick="sendWhatsAppMsg(' + b.id + ', \'collection\')">\uD83D\uDCAC Send Collection Confirmation</button>' : '') +
         (b.status !== 'collected' && b.advance_paid > 0 ? '<button class="btn btn-success btn-lg" onclick="sendWhatsAppMsg(' + b.id + ', \'payment\')">\uD83D\uDCAC Send Payment Receipt</button>' : '') +
         (b.status !== 'collected' && b.advance_paid === 0 ? '<button class="btn btn-success btn-lg" onclick="sendWhatsAppMsg(' + b.id + ', \'booking\')">\uD83D\uDCAC Send Booking Confirmation</button>' : '') +
@@ -469,23 +593,40 @@ function goBackFromBooking() {
     if (target === 'upcoming-bookings') loadUpcoming(currentUpcomingFilter);
     else if (target === 'pending-payments') loadPendingPayments();
     else if (target === 'search-booking') initSearch();
+    else if (target === 'scan-collection') initScanCollection();
     else if (target === 'reports') loadReport(currentReportPeriod, currentReportSort);
 }
 
 async function confirmCollection() {
+    if (state.collectingBooking) return;
     var id = state.currentBookingId;
     var amountReceived = parseFloat($('col-amount').value) || 0;
+    state.collectingBooking = true;
+    var btn = document.querySelector('#collection-modal .btn-success');
+    if (btn) btn.disabled = true;
     try {
-        await api('POST', '/bookings/' + id + '/collect', { amount_received: amountReceived });
+        var b = await api('POST', '/bookings/' + id + '/collect', {
+            amount_received: amountReceived,
+            request_id: genRequestId()
+        });
         closeModal('collection-modal');
         showToast('Booking marked as collected!');
         var currentPage = document.querySelector('.page-section.active');
-        if (currentPage && currentPage.id === 'page-booking-details') {
+        if (currentPage && currentPage.id === 'page-scan-collection') {
+            loadScanTable();
+            refreshScanPreview(id);
+        } else if (currentPage && currentPage.id === 'page-booking-details') {
             viewBooking(id, state.bookingFromPage);
+        } else if (currentPage && currentPage.id === 'page-pending-payments') {
+            loadPendingPayments();
         } else {
             loadUpcoming(currentUpcomingFilter);
         }
-    } catch(e) {}
+    } catch(e) {
+    } finally {
+        state.collectingBooking = false;
+        if (btn) btn.disabled = false;
+    }
 }
 
 function openPaymentModal(id, name, token, balance) {
@@ -503,12 +644,20 @@ function openPaymentModal(id, name, token, balance) {
 }
 
 async function submitPayment() {
+    if (state.savingPayment) return;
     var id = state.currentPaymentBookingId;
     var amount = parseFloat($('pmt-amount').value);
     var notes = $('pmt-notes').value.trim();
     if (!amount || amount <= 0) { showToast('Please enter a valid amount.', 'error'); return; }
+    state.savingPayment = true;
+    var btn = document.querySelector('#payment-modal .btn-success');
+    if (btn) btn.disabled = true;
     try {
-        var b = await api('POST', '/bookings/' + id + '/payment', { amount: amount, notes: notes });
+        var b = await api('POST', '/bookings/' + id + '/payment', {
+            amount: amount,
+            notes: notes,
+            request_id: genRequestId()
+        });
         closeModal('payment-modal');
         showSuccessPopup({
             title: 'Payment Updated Successfully',
@@ -521,13 +670,20 @@ async function submitPayment() {
                         loadPendingPayments();
                     } else if (currentPage && currentPage.id === 'page-booking-details') {
                         viewBooking(id, state.bookingFromPage);
+                    } else if (currentPage && currentPage.id === 'page-scan-collection') {
+                        loadScanTable();
+                        refreshScanPreview(id);
                     } else {
                         loadUpcoming(currentUpcomingFilter);
                     }
                 } }
             ]
         });
-    } catch(e) {}
+    } catch(e) {
+    } finally {
+        state.savingPayment = false;
+        if (btn) btn.disabled = false;
+    }
 }
 
 async function openEditModal(id) {
@@ -536,8 +692,9 @@ async function openEditModal(id) {
         $('edit-name').value = b.customer_name;
         $('edit-phone').value = b.phone;
         $('edit-village').value = b.village || '';
-        $('edit-func-date').value = b.function_date;
-        $('edit-pickup').value = b.pickup_time || '';
+        state.editFuncDate = b.function_date;
+        $('edit-func-date').value = formatDate(b.function_date);
+        $('edit-pickup').value = b.pickup_time ? fmtTime(b.pickup_time) : '';
         $('edit-mutton').value = b.mutton_qty;
         $('edit-chicken').value = b.chicken_qty;
         $('edit-notes').value = b.notes || '';
@@ -548,37 +705,49 @@ async function openEditModal(id) {
 
 async function submitEdit(e) {
     e.preventDefault();
+    if (state.savingEdit) return false;
     var id = state.currentBookingId;
+    var phoneCheck = validatePhone($('edit-phone').value);
+    if (!phoneCheck.ok) {
+        setFieldError('edit-phone-error', phoneCheck.message);
+        showToast(phoneCheck.message, 'error');
+        $('edit-phone').focus();
+        return false;
+    }
+    clearFieldError('edit-phone-error');
     var data = {
         customer_name: $('edit-name').value.trim(),
-        phone: $('edit-phone').value.trim(),
+        phone: phoneCheck.value,
         village: $('edit-village').value.trim(),
-        function_date: $('edit-func-date').value,
-        pickup_time: $('edit-pickup').value,
         mutton_qty: parseFloat($('edit-mutton').value) || 0,
         chicken_qty: parseFloat($('edit-chicken').value) || 0,
         notes: $('edit-notes').value.trim(),
     };
-    if (!data.customer_name || !data.phone || !data.function_date) {
+    if (!data.customer_name) {
         showToast('Please fill in required fields.', 'error');
-        return;
+        return false;
     }
     if (!isValidQuantityStep(data.mutton_qty)) {
         showToast('Mutton Biriyani quantity must be in steps of 0.25 (e.g. 0.25, 0.50, 0.75, 1.00, 1.25).', 'error');
         $('edit-mutton').focus();
-        return;
+        return false;
     }
     if (!isValidQuantityStep(data.chicken_qty)) {
         showToast('Chicken 65 quantity must be in steps of 0.25 (e.g. 0.25, 0.50, 0.75, 1.00, 1.25).', 'error');
         $('edit-chicken').focus();
-        return;
+        return false;
     }
+    state.savingEdit = true;
     try {
         await api('PUT', '/bookings/' + id, data);
         closeModal('edit-modal');
         showToast('Booking updated successfully!');
         viewBooking(id, state.bookingFromPage);
-    } catch(e) {}
+    } catch(e) {
+    } finally {
+        state.savingEdit = false;
+    }
+    return false;
 }
 
 async function printReceipt(id) {
@@ -612,9 +781,10 @@ async function printReceipt(id) {
             '<div class="receipt-row total"><span>Total Amount</span><span>' + formatCurrency(b.grand_total) + '</span></div>' +
             '<div class="receipt-row"><span>Advance Paid</span><span>' + formatCurrency(b.advance_paid) + '</span></div>' +
             '<div class="receipt-row"><span>Balance</span><span>' + formatCurrency(b.balance) + '</span></div></div>' +
-            '<div class="receipt-footer">' +
-            '<p>' + escHtml(s.receipt_footer) + '</p>' +
-            '<p style="margin-top:8px;">Thank you for your order!</p></div></div>';
+            ((s.receipt_footer || '').trim()
+                ? '<div class="receipt-footer"><p>' + escHtml(s.receipt_footer.trim()) + '</p></div>'
+                : '') +
+            '</div>';
         win.document.clear();
         win.document.write(
             '<html><head><title>Receipt - ' + b.token_number + '</title>' +
@@ -644,20 +814,30 @@ function initUpcoming() {
     loadUpcoming(currentUpcomingFilter);
 }
 
+var upcomingSearchTimeout = null;
+
 function filterUpcoming(filter) {
+    if (filter === undefined || filter === null || filter === '') {
+        filter = currentUpcomingFilter;
+    }
     currentUpcomingFilter = filter;
-    document.querySelectorAll('.filter-btn').forEach(function(b) { b.classList.remove('active'); });
-    var btn = document.querySelector('.filter-btn[data-filter="' + filter + '"]');
+    document.querySelectorAll('#upcoming-filters .filter-btn').forEach(function(b) { b.classList.remove('active'); });
+    var btn = document.querySelector('#upcoming-filters .filter-btn[data-filter="' + filter + '"]');
     if (btn) btn.classList.add('active');
     loadUpcoming(filter);
 }
 
+function onUpcomingSearch() {
+    clearTimeout(upcomingSearchTimeout);
+    upcomingSearchTimeout = setTimeout(function () {
+        loadUpcoming(currentUpcomingFilter);
+    }, 250);
+}
+
 function getSeasonBounds() {
-    var now = new Date();
-    var y = now.getMonth() < 3 ? now.getFullYear() - 1 : now.getFullYear();
-    var start = y + '-04-01';
-    var end = (y + 1) + '-03-31';
-    return { start: start, end: end };
+    // The financial/reporting period is configurable in Settings. When it is
+    // not configured we fall back to the Indian financial year (Apr-Mar).
+    return getFinancialPeriod();
 }
 
 async function loadUpcoming(filter) {
@@ -665,6 +845,8 @@ async function loadUpcoming(filter) {
     var container = $('upcoming-list');
     var sortSelect = $('sort-upcoming');
     var sortBy = sortSelect ? sortSelect.value : 'function_date ASC';
+    var searchInput = $('upcoming-search');
+    var query = searchInput ? searchInput.value.trim() : '';
     try {
         var params = '?order_by=' + encodeURIComponent(sortBy);
         var season = getSeasonBounds();
@@ -677,18 +859,22 @@ async function loadUpcoming(filter) {
         } else if (filter === 'season') {
             params += '&start_date=' + season.start + '&end_date=' + season.end;
         }
+        if (query) params += '&search=' + encodeURIComponent(query);
         var bookings = await api('GET', '/bookings' + params);
         state.allUpcomingBookings = bookings;
-        renderUpcoming(bookings);
+        renderUpcoming(bookings, query);
     } catch(e) {
         container.innerHTML = '<div class="empty-state"><h3>Error loading bookings</h3><p>Please try again</p></div>';
     }
 }
 
-function renderUpcoming(bookings) {
+function renderUpcoming(bookings, query) {
     var container = $('upcoming-list');
     if (!bookings || bookings.length === 0) {
-        container.innerHTML = '<div class="empty-state"><div class="empty-icon">??</div><h3>No bookings found</h3><p>Bookings will appear here</p></div>';
+        var emptyMsg = query
+            ? 'No bookings match "' + escHtml(query) + '". Try a different name, phone or token.'
+            : 'Bookings will appear here';
+        container.innerHTML = '<div class="empty-state"><div class="empty-icon">??</div><h3>No bookings found</h3><p>' + emptyMsg + '</p></div>';
         return;
     }
     container.innerHTML = bookings.map(function (b) {
@@ -787,13 +973,31 @@ function selectCalendarDate(dateStr) {
     renderUpcoming(filtered);
 }
 
+var pendingSearchTimeout = null;
+
+function onPendingSearch() {
+    clearTimeout(pendingSearchTimeout);
+    pendingSearchTimeout = setTimeout(function () {
+        loadPendingPayments();
+    }, 250);
+}
+
 async function loadPendingPayments() {
     var container = $('pending-list');
+    var searchInput = $('pending-search');
+    var query = searchInput ? searchInput.value.trim() : '';
     try {
         var season = getSeasonBounds();
-        var bookings = await api('GET', '/bookings?balance_due=true&start_date=' + season.start + '&end_date=' + season.end);
+        var url = '/bookings?balance_due=true&start_date=' + season.start + '&end_date=' + season.end
+            + '&order_by=' + encodeURIComponent('token_number ASC');
+        if (query) url += '&search=' + encodeURIComponent(query);
+        var bookings = await api('GET', url);
         if (bookings.length === 0) {
-            container.innerHTML = '<div class="empty-state"><div class="empty-icon">?</div><h3>No pending payments</h3><p>All bookings are fully paid</p></div>';
+            var msg = query
+                ? 'No pending payments match "' + escHtml(query) + '". Clear the search to see all pending payments.'
+                : 'All bookings are fully paid';
+            var title = query ? 'No matching pending payments' : 'No pending payments';
+            container.innerHTML = '<div class="empty-state"><div class="empty-icon">?</div><h3>' + title + '</h3><p>' + msg + '</p></div>';
             $('pending-count').textContent = '0';
             return;
         }
@@ -809,7 +1013,7 @@ async function loadPendingPayments() {
                 '<p><strong>Payment Status</strong> ' + getPaymentStatusBadge(b.balance) + '</p>' +
                 '</div>' +
                 '<div class="card-actions">' +
-                '<button class="btn btn-primary btn-lg btn-block" onclick="openPaymentModal(' + b.id + ', \'' + escHtml(b.customer_name) + '\', \'' + b.token_number + '\', ' + b.balance + ')">Receive Payment</button>' +
+                '<button class="btn btn-primary btn-lg btn-block" onclick="openPaymentModal(' + b.id + ', \'' + escJs(b.customer_name) + '\', \'' + b.token_number + '\', ' + b.balance + ')">Receive Payment</button>' +
                 '<button class="btn btn-secondary btn-sm" onclick="viewBooking(' + b.id + ', \'pending-payments\')">View Details</button>' +
                 '<button class="btn btn-success btn-sm" onclick="sendWhatsAppMsg(' + b.id + ', \'payment\')">\uD83D\uDCAC WhatsApp</button></div></div>';
         }).join('');
@@ -833,22 +1037,63 @@ function getReportDateRange(period) {
         var mon = new Date(now.setDate(diffToMon));
         var sun = new Date(mon);
         sun.setDate(mon.getDate() + 6);
-        var start = mon.toISOString().slice(0, 10);
-        var end = sun.toISOString().slice(0, 10);
+        var start = mon.getFullYear() + '-' + String(mon.getMonth() + 1).padStart(2, '0') + '-' + String(mon.getDate()).padStart(2, '0');
+        var end = sun.getFullYear() + '-' + String(sun.getMonth() + 1).padStart(2, '0') + '-' + String(sun.getDate()).padStart(2, '0');
         return { start: start, end: end, label: 'Weekly Report (' + formatDate(start) + ' to ' + formatDate(end) + ')' };
     } else if (period === 'monthly') {
-        var now = new Date();
-        var y = now.getFullYear();
-        var m = now.getMonth();
-        var start = y + '-' + String(m + 1).padStart(2, '0') + '-01';
+        var now2 = new Date();
+        var y = now2.getFullYear();
+        var m = now2.getMonth();
+        var start2 = y + '-' + String(m + 1).padStart(2, '0') + '-01';
         var lastDay = new Date(y, m + 1, 0).getDate();
-        var end = y + '-' + String(m + 1).padStart(2, '0') + '-' + String(lastDay).padStart(2, '0');
-        var monthName = now.toLocaleString('en-IN', { month: 'long', year: 'numeric' });
-        return { start: start, end: end, label: 'Monthly Report - ' + monthName };
+        var end2 = y + '-' + String(m + 1).padStart(2, '0') + '-' + String(lastDay).padStart(2, '0');
+        var monthName = now2.toLocaleString('en-IN', { month: 'long', year: 'numeric' });
+        return { start: start2, end: end2, label: 'Monthly Report - ' + monthName };
+    } else if (period === 'custom') {
+        var startInput = $('custom-start');
+        var endInput = $('custom-end');
+        var cs = startInput ? startInput.value : '';
+        var ce = endInput ? endInput.value : '';
+        if (!cs || !ce) {
+            var fp = getFinancialPeriod();
+            cs = cs || fp.start;
+            ce = ce || fp.end;
+        }
+        return {
+            start: cs, end: ce, custom: true,
+            label: 'Custom Report (User selected range: ' + formatDate(cs) + ' to ' + formatDate(ce) + ')'
+        };
     } else {
-        var season = getSeasonBounds();
-        return { start: season.start, end: season.end, label: 'Season Report (' + formatDate(season.start) + ' to ' + formatDate(season.end) + ')' };
+        var period2 = getFinancialPeriod();
+        var suffix = period2.configured ? '' : ' - default Apr-Mar';
+        return {
+            start: period2.start, end: period2.end,
+            label: 'Financial Year Report (' + formatDate(period2.start) + ' to ' + formatDate(period2.end) + ')' + suffix
+        };
     }
+}
+
+function onReportPeriodChange(period) {
+    var row = $('custom-range-row');
+    if (!row) return;
+    if (period === 'custom') {
+        var fp = getFinancialPeriod();
+        var startInput = $('custom-start');
+        var endInput = $('custom-end');
+        if (startInput && !startInput.value) startInput.value = fp.start;
+        if (endInput && !endInput.value) endInput.value = fp.end;
+        row.style.display = 'flex';
+    } else {
+        row.style.display = 'none';
+    }
+}
+
+function applyCustomRange() {
+    var cs = $('custom-start').value;
+    var ce = $('custom-end').value;
+    if (!cs || !ce) { showToast('Select both a start and end date.', 'error'); return; }
+    if (ce < cs) { showToast('End date cannot be earlier than the start date.', 'error'); return; }
+    loadReport('custom', currentReportSort);
 }
 
 function initReports() {
@@ -859,7 +1104,7 @@ async function loadReport(period, sort) {
     if (period !== undefined) currentReportPeriod = period;
     if (sort !== undefined) currentReportSort = sort;
 
-    var btnMap = { season: 0, daily: 1, weekly: 2, monthly: 3 };
+    var btnMap = { season: 0, daily: 1, weekly: 2, monthly: 3, custom: 4 };
     var btns = document.querySelectorAll('#report-filters .filter-btn');
     if (btns && btns.length > 0) {
         btns.forEach(function(b) { b.classList.remove('active'); });
@@ -867,6 +1112,7 @@ async function loadReport(period, sort) {
             btns[btnMap[currentReportPeriod]].classList.add('active');
         }
     }
+    onReportPeriodChange(currentReportPeriod);
 
     var range = getReportDateRange(currentReportPeriod);
     var container = $('report-content');
@@ -903,9 +1149,13 @@ function renderReportView(title, data, bookings) {
         }).join('') +
         '</select></div>';
 
+    var rng = getReportDateRange(currentReportPeriod);
     var html = '<div style="margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">' +
         '<h3 style="color:var(--primary);font-size:1.1rem;margin:0;">' + escHtml(title) + '</h3>' +
         '<span style="font-size:0.85rem;color:var(--text-secondary);font-weight:600;">' + bookings.length + ' Orders Found</span>' +
+        '</div>' +
+        '<div class="report-period-note">Reporting period: <strong>' + formatDate(rng.start) + ' to ' + formatDate(rng.end) + '</strong>' +
+        (currentReportPeriod === 'custom' ? ' &middot; <span class="badge-custom">User selected custom range</span>' : ' &middot; <span class="badge-configured">Configured financial period</span>') +
         '</div>' +
         '<div class="report-metrics">' +
         '<div class="metric-card"><span class="metric-label">Total Bookings</span><span class="metric-value">' + data.total_bookings + '</span></div>' +
@@ -917,8 +1167,9 @@ function renderReportView(title, data, bookings) {
         '</div>' +
         '<div style="margin-top:16px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">' +
         sortSelectHtml +
-        '<div style="display:flex;gap:8px;">' +
-        '<button class="btn btn-primary" onclick="printReport()">Print PDF</button>' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
+        '<button class="btn btn-primary" onclick="downloadPDF()">Download PDF (A4)</button>' +
+        '<button class="btn btn-secondary" onclick="printReport()">Print</button>' +
         '<button class="btn btn-accent" onclick="downloadCSV()">Download CSV</button>' +
         '</div></div>';
 
@@ -982,6 +1233,17 @@ function monthlyReport() {
     loadReport('monthly', currentReportSort);
 }
 
+function downloadPDF() {
+    var range = getReportDateRange(currentReportPeriod);
+    if (!range.start || !range.end) { showToast('Select a valid reporting period first.', 'error'); return; }
+    if (range.end < range.start) { showToast('End date cannot be earlier than the start date.', 'error'); return; }
+    var url = '/api/reports/pdf?start_date=' + encodeURIComponent(range.start)
+        + '&end_date=' + encodeURIComponent(range.end)
+        + '&order_by=' + encodeURIComponent(currentReportSort)
+        + '&label=' + encodeURIComponent(range.label);
+    window.open(url, '_blank');
+}
+
 async function printReport() {
     var range = getReportDateRange(currentReportPeriod);
     try {
@@ -1027,11 +1289,14 @@ async function printReport() {
             '<td style="text-align:right;font-weight:700;">' + formatCurrency(data.total_advance) + '</td>' +
             '<td style="text-align:right;font-weight:700;color:#dc2626;">' + formatCurrency(data.pending_balance) + '</td>' +
             '<td></td></tr></tfoot>' +
-            '</table></div>';
+            '</table>' +
+            ((s.receipt_footer || '').trim() ? '<div class="rp-footer">' + escHtml(s.receipt_footer.trim()) + '</div>' : '') +
+            '</div>';
         win.document.write(
             '<html><head><title>Report - ' + s.business_name + '</title>' +
             '<style>' +
             '* { margin: 0; padding: 0; box-sizing: border-box; }' +
+            '@page { size: A4 portrait; margin: 10mm; }' +
             'body { font-family: Arial, sans-serif; font-size: 12px; padding: 20px; }' +
             '.report-print { max-width: 1000px; margin: 0 auto; }' +
             '.rp-header { text-align: center; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 2px solid #333; }' +
@@ -1042,11 +1307,12 @@ async function printReport() {
             '.rp-metric { border: 1px solid #ddd; padding: 8px 12px; text-align: center; border-radius: 4px; }' +
             '.rp-label { display: block; font-size: 10px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }' +
             '.rp-value { display: block; font-size: 16px; font-weight: 700; margin-top: 4px; }' +
-            '.rp-table { width: 100%; border-collapse: collapse; }' +
+            '.rp-table { width: 100%; border-collapse: collapse; table-layout: fixed; }' +
             '.rp-table th { background: #f5f5f5; padding: 6px 8px; text-align: left; font-size: 10px; text-transform: uppercase; border: 1px solid #ddd; }' +
-            '.rp-table td { padding: 5px 8px; border: 1px solid #ddd; font-size: 11px; }' +
+            '.rp-table td { padding: 5px 8px; border: 1px solid #ddd; font-size: 11px; word-wrap: break-word; overflow-wrap: anywhere; }' +
             '.rp-table tr:nth-child(even) { background: #fafafa; }' +
-            '@media print { body { padding: 10px; } .rp-header { border-bottom-color: #000; } }' +
+            '.rp-footer { margin-top: 16px; padding-top: 10px; border-top: 1px dashed #999; text-align: center; font-size: 11px; color: #555; }' +
+            '@media print { body { padding: 0; } .rp-header { border-bottom-color: #000; } thead { display: table-header-group; } tr { break-inside: avoid; } .report-print { max-width: none; } }' +
             '</style></head><body>' + html + '<script>window.onload=function(){window.print();window.close();}<\/script></body></html>'
         );
         win.document.close();
@@ -1132,6 +1398,7 @@ function csvDownloadFromBookings(bookings, filename, headers) {
 async function loadSettings() {
     try {
         var s = await api('GET', '/settings');
+        state.settings = s;
         $('setting-business').value = s.business_name;
         $('setting-address').value = s.address || '';
         $('setting-phone').value = s.phone || '';
@@ -1139,12 +1406,38 @@ async function loadSettings() {
         $('setting-chicken').value = s.chicken_65_price;
         $('setting-collection-date').value = s.collection_date || '';
         $('setting-collection-time').value = s.collection_time || '';
-        $('setting-footer').value = s.receipt_footer;
+        $('setting-fin-start').value = s.financial_start_date || '';
+        $('setting-fin-end').value = s.financial_end_date || '';
+        $('setting-footer').value = s.receipt_footer || '';
+        updateFinancialPeriodSummary();
     } catch(e) {}
+}
+
+function updateFinancialPeriodSummary() {
+    var el = $('financial-period-summary');
+    if (!el) return;
+    var fp = getFinancialPeriod();
+    el.textContent = fp.configured
+        ? 'Configured reporting period: ' + formatDate(fp.start) + ' to ' + formatDate(fp.end)
+        : 'No period configured. Reports currently default to ' + formatDate(fp.start) + ' to ' + formatDate(fp.end) + ' (Apr-Mar).';
 }
 
 async function saveSettings(e) {
     e.preventDefault();
+    if (state.savingSettings) return false;
+    var finStart = $('setting-fin-start').value;
+    var finEnd = $('setting-fin-end').value;
+    if ((finStart && !finEnd) || (!finStart && finEnd)) {
+        setFieldError('financial-period-error', 'Provide both the financial period start and end date.');
+        showToast('Provide both the financial period start and end date.', 'error');
+        return false;
+    }
+    if (finStart && finEnd && finEnd < finStart) {
+        setFieldError('financial-period-error', 'Financial period end date cannot be earlier than the start date.');
+        showToast('Financial period end date cannot be earlier than the start date.', 'error');
+        return false;
+    }
+    clearFieldError('financial-period-error');
     var data = {
         business_name: $('setting-business').value.trim(),
         address: $('setting-address').value.trim(),
@@ -1154,17 +1447,25 @@ async function saveSettings(e) {
         collection_date: $('setting-collection-date').value,
         collection_time: $('setting-collection-time').value,
         receipt_footer: $('setting-footer').value.trim(),
+        financial_start_date: finStart,
+        financial_end_date: finEnd,
     };
-    if (!data.business_name) { showToast('Business name is required.', 'error'); return; }
+    if (!data.business_name) { showToast('Business name is required.', 'error'); return false; }
     if (data.mutton_biriyani_price === 0 && data.chicken_65_price === 0) {
         showToast('Set at least one item price.', 'error');
-        return;
+        return false;
     }
+    state.savingSettings = true;
     try {
         var res = await api('PUT', '/settings', data);
-        state.settings = data;
+        state.settings = res;
+        updateFinancialPeriodSummary();
         showToast('Settings saved successfully!');
-    } catch(e) {}
+    } catch(e) {
+    } finally {
+        state.savingSettings = false;
+    }
+    return false;
 }
 
 // ─── Scan Collection ────────────────────────────────────────────
@@ -1185,12 +1486,38 @@ function playBeep(success) {
     } catch(e) {}
 }
 
+function setScanRecordsVisible(visible) {
+    var rec = $('scan-records-section');
+    if (rec) rec.style.display = visible ? 'block' : 'none';
+}
+
 function showScanWaiting() {
     $('scan-result').style.display = 'none';
     $('scan-result').innerHTML = '';
     $('scan-waiting').style.display = 'block';
+    setScanRecordsVisible(true);
     $('scan-input').value = '';
+    state.lastScanToken = null;
+    state.scanPreviewBooking = null;
     setTimeout(function() { $('scan-input').focus(); }, 100);
+}
+
+function showScanError(message) {
+    state.scanPreviewBooking = null;
+    $('scan-waiting').style.display = 'none';
+    setScanRecordsVisible(false);
+    $('scan-result').innerHTML = '<div class="sc-panel sc-panel-error">' +
+        '<div class="sc-error-body" role="alert">' +
+        '<div class="scan-alert-icon">&#x26A0;</div>' +
+        '<div><strong>Scan Not Recognised</strong>' +
+        '<p>' + escHtml(message) + '</p>' +
+        '<p class="sc-error-hint">Expected an SMM QR code such as <strong>SMM0001</strong>.</p>' +
+        '</div></div>' +
+        '<div class="sc-action-row sc-action-row-center">' +
+        '<button type="button" class="btn btn-primary btn-lg" onclick="showScanWaiting()">Scan Next</button>' +
+        '</div>' +
+        '</div>';
+    $('scan-result').style.display = 'block';
 }
 
 function initScanCollection() {
@@ -1203,6 +1530,86 @@ function initScanCollection() {
             processScan(token);
         }
     };
+    loadScanTable();
+}
+
+async function loadScanTable() {
+    var loading = $('scan-table-loading');
+    var wrapper = $('scan-table-wrapper');
+    if (loading) loading.style.display = 'block';
+    if (wrapper) wrapper.style.display = 'none';
+    try {
+        var res = await api('GET', '/bookings?order_by=' + encodeURIComponent('function_date ASC'));
+        state.allScanBookings = Array.isArray(res) ? res : [];
+        renderScanTable();
+    } catch(e) {
+        if (loading) loading.textContent = 'Could not load the scan table. Please try again.';
+    }
+}
+
+function renderScanTable() {
+    var loading = $('scan-table-loading');
+    var wrapper = $('scan-table-wrapper');
+    var body = $('scan-table-body');
+    var empty = $('scan-table-empty');
+    if (!body) return;
+
+    var filter = $('scan-table-filter') ? $('scan-table-filter').value : 'all';
+    var all = state.allScanBookings || [];
+    var rows = all.filter(function(b) {
+        if (filter === 'pending') return b.status !== 'collected';
+        if (filter === 'collected') return b.status === 'collected';
+        return true;
+    });
+
+    if (loading) loading.style.display = 'none';
+
+    if (rows.length === 0) {
+        body.innerHTML = '';
+        if (wrapper) wrapper.style.display = 'none';
+        if (empty) empty.style.display = 'block';
+        return;
+    }
+    if (wrapper) wrapper.style.display = 'block';
+    if (empty) empty.style.display = 'none';
+
+    body.innerHTML = rows.map(function(b) {
+        var collected = b.status === 'collected';
+        var statusBadge = collected
+            ? '<span class="status-badge collected">Collected</span>'
+            : '<span class="status-badge pending">Pending</span>';
+        var balanceClass = b.balance > 0 ? 'style="color:var(--danger);font-weight:700;"' : '';
+        var action = collected
+            ? '<span class="scan-table-done">&#10003; Done</span>'
+            : '<button class="btn btn-success btn-sm" onclick="openCollectionModal(' + b.id + ')">Collect</button>';
+        return '<tr class="scan-row-' + b.status + '">' +
+            '<td data-label="Booking ID"><strong>' + escHtml(b.token_number) + '</strong></td>' +
+            '<td data-label="Customer">' + escHtml(b.customer_name) + '</td>' +
+            '<td data-label="Phone">' + escHtml(b.phone) + '</td>' +
+            '<td data-label="Items">' + scanItemsText(b) + '</td>' +
+            '<td data-label="Quantity">' + scanQtyText(b) + '</td>' +
+            '<td data-label="Total Amount" class="num">' + formatCurrency(b.grand_total) + '</td>' +
+            '<td data-label="Paid" class="num">' + formatCurrency(b.advance_paid) + '</td>' +
+            '<td data-label="Remaining" class="num"' + balanceClass + '>' + formatCurrency(b.balance) + '</td>' +
+            '<td data-label="Status">' + statusBadge + '</td>' +
+            '<td data-label="Collection Date">' + formatDate(b.function_date) + '</td>' +
+            '<td data-label="Action">' + action + '</td>' +
+            '</tr>';
+    }).join('');
+}
+
+function scanItemsText(b) {
+    var items = [];
+    if (parseFloat(b.mutton_qty) > 0 || b.mutton_qty) items.push('Mutton Biriyani');
+    if (parseFloat(b.chicken_qty) > 0 || b.chicken_qty) items.push('Chicken 65');
+    return items.length ? escHtml(items.join(', ')) : '&mdash;';
+}
+
+function scanQtyText(b) {
+    var parts = [];
+    if (b.mutton_qty) parts.push(escHtml(scanFmtQty(b.mutton_qty)) + ' Padi');
+    if (b.chicken_qty) parts.push(escHtml(scanFmtQty(b.chicken_qty)) + ' Kg');
+    return parts.length ? parts.join(' &middot; ') : '&mdash;';
 }
 
 document.addEventListener('keydown', function(e) {
@@ -1219,98 +1626,335 @@ document.addEventListener('keydown', function(e) {
 });
 
 async function processScan(token) {
+    if (state.scanSubmitting) return;
+    if (!token) return;
+    if (state.lastScanToken === token && state.scanPreviewBooking) {
+        showToast('This code is already shown below.', 'info');
+        return;
+    }
+    state.scanSubmitting = true;
     try {
-        var b = await api('GET', '/bookings/by-token/' + encodeURIComponent(token));
-        if (!b || !b.id) throw new Error('Not found');
+        var b = await api('GET', '/scan?code=' + encodeURIComponent(token));
+        if (!b || !b.id) throw new Error('Booking not found.');
+        state.lastScanToken = token;
         playBeep(true);
         showToast('\u2705 Booking Found', 'success');
         showScanPreview(b);
     } catch(e) {
         playBeep(false);
-        showToast('\u274C Invalid Token', 'error');
-        showScanWaiting();
+        var msg = (e && e.message) ? e.message : 'Invalid or unrecognised QR code.';
+        showToast('\u274C ' + msg, 'error');
+        showScanError(msg);
+    } finally {
+        state.scanSubmitting = false;
     }
+}
+
+function scanFmtQty(qty) {
+    var n = Number(qty);
+    if (!isFinite(n)) return String(qty);
+    return String(Math.round(n * 100) / 100);
+}
+
+function scanMetaCell(label, valueHtml) {
+    return '<div class="sc-meta-cell">' +
+        '<span class="sc-meta-label">' + label + '</span>' +
+        '<span class="sc-meta-value">' + valueHtml + '</span>' +
+        '</div>';
+}
+
+function buildScanHeader(b) {
+    var statusBadge = getStatusBadge(b.status);
+    var paymentBadge = getPaymentStatusBadge(b.balance);
+    var collectionDate = formatDate(b.function_date) || '&mdash;';
+    if (b.pickup_time) collectionDate += ' <span class="sc-meta-sub">' + fmtTime(b.pickup_time) + '</span>';
+
+    return '<div class="sc-header">' +
+        '<div class="sc-header-main">' +
+        '<div class="sc-title-row">' +
+        '<h2 class="sc-customer-name">' + escHtml(b.customer_name) + '</h2>' +
+        '<span class="sc-badges">' + statusBadge + paymentBadge + '</span>' +
+        '</div>' +
+        '<div class="sc-meta">' +
+        scanMetaCell('Booking ID', '<span class="sc-token">' + escHtml(b.token_number) + '</span>') +
+        scanMetaCell('Phone', escHtml(b.phone) || '&mdash;') +
+        scanMetaCell('Booking Date', formatDate(b.booking_date) || '&mdash;') +
+        scanMetaCell('Function Date', collectionDate) +
+        '</div>' +
+        '</div>' +
+        '<div class="sc-header-actions">' +
+        '<button type="button" class="btn btn-secondary" onclick="showScanWaiting()">Scan Next</button>' +
+        '</div>' +
+        '</div>';
+}
+
+function scanItemRows(b) {
+    var rows = [];
+    var mQty = Number(b.mutton_qty) || 0;
+    var cQty = Number(b.chicken_qty) || 0;
+    if (mQty > 0) rows.push({ name: 'Mutton Biriyani', qty: mQty, unit: 'Padi', rate: Number(b.mutton_price_per_kg) || 0 });
+    if (cQty > 0) rows.push({ name: 'Chicken 65', qty: cQty, unit: 'Kg', rate: Number(b.chicken_price_per_kg) || 0 });
+    return rows;
+}
+
+function buildScanItems(b) {
+    var rows = scanItemRows(b);
+    var body;
+    if (rows.length === 0) {
+        body = '<tr><td colspan="6" class="sc-items-empty">No items recorded for this booking.</td></tr>';
+    } else {
+        body = rows.map(function(r) {
+            return '<tr>' +
+                '<td class="sc-item-name">' + escHtml(r.name) + '</td>' +
+                '<td class="num sc-item-qty">' + scanFmtQty(r.qty) + '</td>' +
+                '<td class="sc-item-unit">' + r.unit + '</td>' +
+                '<td class="num">' + formatCurrency(r.rate) + '</td>' +
+                '<td class="num sc-item-amount">' + formatCurrency(r.qty * r.rate) + '</td>' +
+                '<td class="sc-item-notes">&mdash;</td>' +
+                '</tr>';
+        }).join('');
+    }
+    var notes = (b.notes || '').trim();
+    return '<div class="sc-section">' +
+        '<div class="sc-section-head">' +
+        '<h3>Order Quantities</h3>' +
+        '<span class="sc-section-note">' + rows.length + ' item' + (rows.length === 1 ? '' : 's') + ' ordered</span>' +
+        '</div>' +
+        '<div class="sc-items-wrap"><table class="sc-items-table">' +
+        '<thead><tr>' +
+        '<th class="sc-th-item">Item Name</th>' +
+        '<th class="num">Quantity</th>' +
+        '<th>Unit</th>' +
+        '<th class="num">Rate</th>' +
+        '<th class="num">Amount</th>' +
+        '<th>Notes</th>' +
+        '</tr></thead>' +
+        '<tbody>' + body + '</tbody>' +
+        '</table></div>' +
+        (notes ? '<p class="sc-items-notes"><strong>Booking notes:</strong> ' + escHtml(notes) + '</p>' : '') +
+        '</div>';
+}
+
+function scanSummaryTile(cls, label, value, note) {
+    return '<div class="sc-sum-tile ' + cls + '">' +
+        '<span class="sc-sum-label">' + label + '</span>' +
+        '<span class="sc-sum-value">' + value + '</span>' +
+        '<span class="sc-sum-note">' + note + '</span>' +
+        '</div>';
+}
+
+function buildScanSummary(b) {
+    var total = Number(b.grand_total) || 0;
+    var paid = Number(b.advance_paid) || 0;
+    var bal = Number(b.balance) || 0;
+    var due = bal > 0.000001;
+
+    var dueTile = due
+        ? scanSummaryTile('sc-sum-due', 'Remaining Balance', formatCurrency(bal), 'Due now &middot; settle at collection')
+        : scanSummaryTile('sc-sum-cleared', 'Remaining Balance', formatCurrency(0), 'Nothing due &middot; fully paid');
+
+    return '<div class="sc-section">' +
+        '<div class="sc-section-head"><h3>Payment Summary</h3></div>' +
+        '<div class="sc-summary">' +
+        scanSummaryTile('sc-sum-total', 'Total Amount', formatCurrency(total), 'Order value') +
+        scanSummaryTile('sc-sum-paid', 'Paid So Far', formatCurrency(paid), 'Received to date') +
+        dueTile +
+        '</div>' +
+        '</div>';
+}
+
+function buildScanAction(b) {
+    var bal = Number(b.balance) || 0;
+    var due = bal > 0.000001;
+    var collectedOn = formatDate(b.function_date);
+
+    if (b.status === 'collected') {
+        return '<div class="sc-section sc-action-section">' +
+            '<div class="sc-notice sc-notice-done" role="status">' +
+            '<span class="sc-notice-icon">&#10003;</span>' +
+            '<div><strong>Already Collected</strong>' +
+            '<p>Collected on ' + collectedOn + '. ' +
+            (due ? 'An outstanding balance of ' + formatCurrency(bal) + ' still remains on this booking.' : 'This booking is fully paid.') +
+            '</p></div></div>' +
+            '<div class="sc-action-row">' +
+            '<button type="button" class="btn btn-primary btn-lg" onclick="showScanWaiting()">Scan Next Customer</button>' +
+            '</div>' +
+            '</div>';
+    }
+
+    if (due) {
+        return '<div class="sc-section sc-action-section">' +
+            '<div class="sc-section-head">' +
+            '<h3>Record Collection</h3>' +
+            '<span class="sc-section-note">Partial payments allowed</span>' +
+            '</div>' +
+            '<div class="sc-action-row">' +
+            '<div class="sc-action-field">' +
+            '<label class="form-label" for="scan-received">Amount Received</label>' +
+            '<div class="sc-amount-wrap">' +
+            '<span class="sc-amount-symbol">&#8377;</span>' +
+            '<input type="number" class="form-input sc-amount-input" id="scan-received" min="0" step="0.01" inputmode="decimal" placeholder="0.00" autocomplete="off" oninput="onScanAmountInput()">' +
+            '</div>' +
+            '<span class="field-error" id="scan-action-error" role="alert"></span>' +
+            '</div>' +
+            '<div class="sc-action-side">' +
+            '<div class="sc-after-balance">' +
+            '<span class="sc-after-label">Balance after collection</span>' +
+            '<strong class="sc-after-value" id="scan-after-balance">' + formatCurrency(bal) + '</strong>' +
+            '</div>' +
+            '<div class="sc-action-buttons">' +
+            '<button type="button" class="btn btn-success btn-lg sc-confirm" onclick="confirmScanCollection(' + b.id + ')">Confirm Collection</button>' +
+            '<button type="button" class="btn btn-secondary btn-lg" onclick="showScanWaiting()">Skip</button>' +
+            '</div>' +
+            '</div>' +
+            '</div>' +
+            '</div>';
+    }
+
+    return '<div class="sc-section sc-action-section">' +
+        '<div class="sc-notice sc-notice-paid" role="status">' +
+        '<span class="sc-notice-icon">&#10003;</span>' +
+        '<div><strong>No Outstanding Balance</strong>' +
+        '<p>This order is fully paid. Confirm to mark it as collected.</p>' +
+        '</div></div>' +
+        '<div class="sc-action-row">' +
+        '<button type="button" class="btn btn-success btn-lg sc-confirm" onclick="confirmScanCollection(' + b.id + ')">Mark as Collected</button>' +
+        '<button type="button" class="btn btn-secondary btn-lg" onclick="showScanWaiting()">Scan Next</button>' +
+        '</div>' +
+        '</div>';
 }
 
 function showScanPreview(b) {
+    state.scanPreviewBooking = b;
     $('scan-waiting').style.display = 'none';
-    var statusColor = b.status === 'collected' ? 'var(--success)' : 'var(--accent)';
-    var paymentLabel = b.balance <= 0 ? '<span class="status-badge paid">&#10003; Paid</span>' : '<span class="status-badge pending-balance">&#128992; Pending</span>';
-    var isCollected = b.status === 'collected';
-
-    var html = '<div class="scan-preview">' +
-        '<div class="scan-preview-header">' +
-        '<span class="card-token">' + b.token_number + '</span>' +
-        '<span class="status-badge ' + b.status + '">' + b.status.charAt(0).toUpperCase() + b.status.slice(1) + '</span>' +
-        '</div>' +
-        '<div class="detail-grid" style="margin-bottom:16px;">' +
-        '<div class="detail-item"><span class="detail-label">Customer Name</span><span class="detail-value">' + escHtml(b.customer_name) + '</span></div>' +
-        '<div class="detail-item"><span class="detail-label">Phone Number</span><span class="detail-value">' + escHtml(b.phone) + '</span></div>' +
-        '<div class="detail-item"><span class="detail-label">Booking Date</span><span class="detail-value">' + formatDate(b.booking_date) + '</span></div>' +
-        '<div class="detail-item"><span class="detail-label">Function Date</span><span class="detail-value">' + formatDate(b.function_date) + '</span></div>' +
-        '<div class="detail-item"><span class="detail-label">Mutton Biriyani (Padi)</span><span class="detail-value">' + (b.mutton_qty || '0') + '</span></div>' +
-        '<div class="detail-item"><span class="detail-label">Chicken 65 (Kg)</span><span class="detail-value">' + (b.chicken_qty || '0') + '</span></div>' +
-        '<div class="detail-item"><span class="detail-label">Total Amount</span><span class="detail-value amount">' + formatCurrency(b.grand_total) + '</span></div>' +
-        '<div class="detail-item"><span class="detail-label">Advance Paid</span><span class="detail-value" style="color:var(--success);">' + formatCurrency(b.advance_paid) + '</span></div>' +
-        '<div class="detail-item"><span class="detail-label">Remaining Balance</span><span class="detail-value" style="color:var(--danger);font-weight:700;">' + formatCurrency(b.balance) + '</span></div>' +
-        '<div class="detail-item"><span class="detail-label">Collection Status</span><span class="detail-value" style="color:' + statusColor + ';font-weight:700;">' + (b.status === 'collected' ? 'Collected' : 'Pending') + '</span></div>' +
-        '<div class="detail-item"><span class="detail-label">Payment Status</span><span class="detail-value">' + paymentLabel + '</span></div>' +
+    setScanRecordsVisible(false);
+    $('scan-result').innerHTML = '<div class="sc-panel">' +
+        buildScanHeader(b) +
+        buildScanItems(b) +
+        buildScanSummary(b) +
+        buildScanAction(b) +
         '</div>';
-
-    if (isCollected) {
-        html += '<div class="scan-already" role="alert">' +
-            '<div class="scan-alert-icon">&#x26A0;</div>' +
-            '<div><strong>Already Collected</strong>' +
-            '<p style="font-size:0.85rem;color:var(--text-secondary);margin-top:4px;">This booking was collected on ' + formatDate(b.function_date) + '</p></div>' +
-            '</div>' +
-            '<div class="btn-group" style="margin-top:16px;">' +
-            '<button class="btn btn-secondary btn-lg btn-block" onclick="showScanWaiting()">Scan Next</button>' +
-            '</div>';
-    } else if (b.balance > 0) {
-        html += '<div class="scan-balance-due">' +
-            '<p style="font-weight:700;margin-bottom:8px;">Remaining Balance: <span style="color:var(--danger);font-size:1.3rem;">' + formatCurrency(b.balance) + '</span></p>' +
-            '<div class="form-group">' +
-            '<label class="form-label" for="scan-received">Amount Received Today (?)</label>' +
-            '<input type="number" class="form-input form-input-lg" id="scan-received" min="0.01" step="0.01" placeholder="Enter amount received..." autocomplete="off">' +
-            '</div>' +
-            '<div class="btn-group">' +
-            '<button class="btn btn-success btn-lg btn-block" onclick="confirmScanCollection(' + b.id + ')">Confirm Collection</button>' +
-            '<button class="btn btn-secondary btn-lg btn-block" onclick="showScanWaiting()">Skip</button>' +
-            '</div>' +
-            '</div>';
-    } else {
-        html += '<div class="scan-balance-due" style="text-align:center;">' +
-            '<p style="font-size:1.1rem;color:var(--success);font-weight:700;margin-bottom:16px;">No Pending Balance</p>' +
-            '<div class="btn-group">' +
-            '<button class="btn btn-success btn-lg btn-block" onclick="confirmScanCollection(' + b.id + ')">Mark as Collected</button>' +
-            '<button class="btn btn-secondary btn-lg btn-block" onclick="showScanWaiting()">Scan Next</button>' +
-            '</div>' +
-            '</div>';
-    }
-
-    html += '</div>';
-    $('scan-result').innerHTML = html;
     $('scan-result').style.display = 'block';
-    if (b.balance > 0) {
-        setTimeout(function() { var inp = $('scan-received'); if (inp) inp.focus(); }, 100);
+    if ($('scan-received')) {
+        setTimeout(function() {
+            var inp = $('scan-received');
+            if (inp) inp.focus();
+        }, 100);
     }
 }
 
-async function confirmScanCollection(id) {
+function setScanActionError(msg) {
+    setFieldError('scan-action-error', msg);
     var inp = $('scan-received');
-    var amount = inp ? (parseFloat(inp.value) || 0) : 0;
+    if (inp) inp.classList.toggle('input-error', !!msg);
+}
+
+function onScanAmountInput() {
+    var inp = $('scan-received');
+    var out = $('scan-after-balance');
+    if (!inp) return;
+    var bal = state.scanPreviewBooking ? (Number(state.scanPreviewBooking.balance) || 0) : 0;
+    var raw = String(inp.value == null ? '' : inp.value).trim();
+    var n = raw === '' ? NaN : Number(raw);
+
+    if (out) {
+        var valid = raw !== '' && isFinite(n) && !isNaN(n) && n >= 0;
+        out.textContent = formatCurrency(valid ? Math.max(0, Math.round((bal - n) * 100) / 100) : bal);
+    }
+    if (raw !== '' && isFinite(n) && !isNaN(n) && n > bal + 0.000001) {
+        setScanActionError('Amount exceeds the outstanding balance of ' + formatCurrency(bal) + '.');
+    } else {
+        setScanActionError('');
+    }
+}
+
+async function refreshScanPreview(id) {
+    if (!state.scanPreviewBooking || state.scanPreviewBooking.id !== id) return;
+    var active = document.querySelector('.page-section.active');
+    if (!active || active.id !== 'page-scan-collection') return;
+    var before = state.scanPreviewBooking;
     try {
-        var b = await api('POST', '/bookings/' + id + '/collect', { amount_received: amount });
-        closeModal('collection-modal');
-        showSuccessPopup({
-            title: 'Order Collected Successfully',
-            buttons: [
-                { label: 'Send WhatsApp', cls: 'btn-success', action: function() { sendWhatsAppFromPopup(b, 'collection'); } },
-                { label: 'Scan Next Customer', cls: 'btn-accent', action: function() { closeModal('success-modal'); showScanWaiting(); } },
-                { label: 'Home', cls: 'btn-secondary', action: function() { closeModal('success-modal'); showPage('dashboard'); } }
-            ]
-        });
+        var fresh = await api('GET', '/bookings/' + id);
+        if (!fresh || !fresh.id) return;
+        if (fresh.balance !== before.balance || fresh.status !== before.status ||
+            fresh.advance_paid !== before.advance_paid || fresh.grand_total !== before.grand_total) {
+            showScanPreview(fresh);
+        }
     } catch(e) {}
+}
+
+async function confirmScanCollection(id) {
+    if (state.scanSubmitting) return;
+    state.scanSubmitting = true;
+    try {
+        var preview = state.scanPreviewBooking;
+        if (!preview || preview.id !== id) {
+            preview = await api('GET', '/bookings/' + id);
+            state.scanPreviewBooking = preview;
+        }
+        var outstanding = Number(preview.balance) || 0;
+        var amount = 0;
+        var inp = $('scan-received');
+
+        if (inp) {
+            var raw = String(inp.value == null ? '' : inp.value).trim();
+            if (raw === '') {
+                setScanActionError('Enter the amount received.');
+                inp.focus();
+                return;
+            }
+            var n = Number(raw);
+            if (!isFinite(n) || isNaN(n)) {
+                setScanActionError('Enter a valid amount.');
+                inp.focus();
+                return;
+            }
+            if (n < 0) {
+                setScanActionError('Amount cannot be negative.');
+                inp.focus();
+                return;
+            }
+            if (n === 0) {
+                setScanActionError('Amount must be greater than zero.');
+                inp.focus();
+                return;
+            }
+            if (n > outstanding + 0.000001) {
+                setScanActionError('Amount exceeds the outstanding balance of ' + formatCurrency(outstanding) + '.');
+                inp.focus();
+                return;
+            }
+            amount = Math.round(n * 100) / 100;
+        }
+        setScanActionError('');
+
+        var btnList = document.querySelectorAll('#scan-result .btn');
+        btnList.forEach(function(x) { x.disabled = true; });
+        try {
+            var updated = await api('POST', '/bookings/' + id + '/collect', {
+                amount_received: amount,
+                request_id: genRequestId()
+            });
+            // Only the confirmed backend response updates what is on screen.
+            state.scanPreviewBooking = updated;
+            loadScanTable();
+            showScanPreview(updated);
+            showSuccessPopup({
+                title: 'Order Collected Successfully',
+                info: '<p>Remaining Balance</p><div class="token-display">' + formatCurrency(updated.balance || 0) + '</div>',
+                buttons: [
+                    { label: 'Send WhatsApp', cls: 'btn-success', action: function() { sendWhatsAppFromPopup(updated, 'collection'); } },
+                    { label: 'Scan Next Customer', cls: 'btn-accent', action: function() { closeModal('success-modal'); showScanWaiting(); } },
+                    { label: 'Home', cls: 'btn-secondary', action: function() { closeModal('success-modal'); showPage('dashboard'); } }
+                ]
+            });
+        } finally {
+            btnList.forEach(function(x) { x.disabled = false; });
+        }
+    } catch(e) {
+    } finally {
+        state.scanSubmitting = false;
+    }
 }
 
 // ─── End Scan Collection ────────────────────────────────────────
