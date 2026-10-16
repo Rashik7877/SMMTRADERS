@@ -1,9 +1,4 @@
 {
-  "functions": {
-    "main.py": {
-      "maxDuration": 60,
-      "includeFiles": "static/**",
-      "excludeFiles": "{test_*.py,conftest.py,scripts/**,**/__pycache__/**,.pytest_cache/**,*.db,*.db-*,.env*}"
-    }
-  }
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "fastapi"
 }

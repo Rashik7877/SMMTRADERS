@@ -1,0 +1,25 @@
+# Keep the deployment bundle small. Runtime code (main.py, db.py, auth.py,
+# pdf_reports.py, requirements.txt, static/) is intentionally NOT ignored.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Tests and developer tooling
+test_*.py
+conftest.py
+scripts/
+
+# Local database (production uses Turso) and generated reports
+*.db
+*.db-*
+migration_report.txt
+
+# Secrets and local environment
+.env
+.env.*
+
+# Repo metadata
+README.md
+.vercel/
