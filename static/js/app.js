@@ -204,13 +204,19 @@ function formatApiError(detail) {
     }
     return String(detail);
 }
+var _csrfToken = null;
 async function api(method, url, body) {
     var opts = { method: method, headers: { 'Content-Type': 'application/json' } };
+    if (method !== 'GET' && _csrfToken) opts.headers['X-CSRF-Token'] = _csrfToken;
     if (body && method !== 'GET') opts.body = JSON.stringify(body);
     var fetchUrl = '/api' + url;
     if (method === 'GET') fetchUrl += (url.includes('?') ? '&' : '?') + '_t=' + Date.now();
     try {
         var res = await fetch(fetchUrl, opts);
+        if (res.status === 401) {
+            window.location.href = '/login';
+            throw new Error('Session expired');
+        }
         if (!res.ok) {
             var err = await res.json().catch(function() { return { detail: 'Request failed' }; });
             throw new Error(formatApiError(err.detail));
@@ -220,6 +226,11 @@ async function api(method, url, body) {
         showToast(e.message, 'error');
         throw e;
     }
+}
+async function logout() {
+    try { await api('POST', '/auth/logout'); } catch (e) {}
+    _csrfToken = null;
+    window.location.href = '/login';
 }
 function escHtml(s) {
     var div = document.createElement('div');
@@ -1960,6 +1971,17 @@ async function confirmScanCollection(id) {
 // ─── End Scan Collection ────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', async function() {
+    try {
+        var sess = await fetch('/api/auth/session').then(function(r) { return r.json(); });
+        if (!sess || !sess.authenticated) {
+            window.location.replace('/login');
+            return;
+        }
+        _csrfToken = sess.csrf_token || null;
+    } catch (e) {
+        window.location.replace('/login');
+        return;
+    }
     try {
         var s = await api('GET', '/settings');
         if (s && s.business_name) {

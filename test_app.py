@@ -24,12 +24,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 # --------------------------------------------------------------------------- #
 # Fixtures
 # --------------------------------------------------------------------------- #
-
-@pytest.fixture()
-def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(main, "DB_PATH", str(tmp_path / "test.db"))
-    with TestClient(main.app) as c:
-        yield c
+# The signed-in ``client`` fixture (and the scratch database wiring) lives in
+# conftest.py; tests here rely on the authenticated client by default.
 
 
 def create_booking(client, name="Alice", phone="9876543210", date="2025-06-01",

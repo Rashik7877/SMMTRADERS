@@ -1,98 +1,51 @@
 import calendar
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import os
 import re
-import sqlite3
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import FastAPI, HTTPException, Query, Response, status
+from fastapi import FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+import auth
+import db
+from db import DatabaseConfigError, get_db
 from pdf_reports import build_report_pdf
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.environ.get("SMM_TRADERS_DB", os.path.join(BASE_DIR, "smm_traders.db"))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
+# Local convenience: load a .env file so start.bat works out of the box.
+# Vercel injects real environment variables, and the test suite skips this
+# (SMM_SKIP_DOTENV=1) so scratch credentials are never overridden.
+if os.environ.get("SMM_SKIP_DOTENV") != "1":
+    try:
+        from dotenv import load_dotenv
 
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+        load_dotenv(os.path.join(BASE_DIR, ".env"), override=False)
+    except ImportError:
+        pass
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def now_ist() -> datetime:
+    """Business-local (India Standard Time) wall clock.
+
+    Vercel runs in UTC; using IST keeps booking/collection dates identical to
+    the locally hosted application.
+    """
+    return datetime.now(IST)
 
 
 def init_db():
     with get_db() as conn:
+        db.ensure_schema(conn)
         cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS settings (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                business_name TEXT NOT NULL,
-                address TEXT,
-                phone TEXT,
-                mutton_biriyani_price REAL NOT NULL DEFAULT 2500.0,
-                chicken_65_price REAL NOT NULL DEFAULT 350.0,
-                collection_date TEXT,
-                collection_time TEXT,
-                receipt_footer TEXT,
-                financial_start_date TEXT,
-                financial_end_date TEXT
-            )
-        """)
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS bookings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                token_number TEXT UNIQUE NOT NULL,
-                customer_name TEXT NOT NULL,
-                phone TEXT NOT NULL,
-                village TEXT,
-                booking_date TEXT NOT NULL,
-                function_date TEXT NOT NULL,
-                pickup_time TEXT,
-                mutton_qty REAL NOT NULL DEFAULT 0.0,
-                mutton_price_per_kg REAL NOT NULL DEFAULT 0.0,
-                chicken_qty REAL NOT NULL DEFAULT 0.0,
-                chicken_price_per_kg REAL NOT NULL DEFAULT 0.0,
-                grand_total REAL NOT NULL DEFAULT 0.0,
-                advance_paid REAL NOT NULL DEFAULT 0.0,
-                balance REAL NOT NULL DEFAULT 0.0,
-                status TEXT NOT NULL DEFAULT 'pending',
-                notes TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS payments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                booking_id INTEGER NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
-                amount REAL NOT NULL,
-                payment_date TEXT NOT NULL,
-                notes TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-        # Backward-compatible migrations for databases created by older versions.
-        existing_cols = {row[1] for row in cursor.execute("PRAGMA table_info(settings)").fetchall()}
-        for col in ("financial_start_date", "financial_end_date"):
-            if col not in existing_cols:
-                cursor.execute(f"ALTER TABLE settings ADD COLUMN {col} TEXT")
-
-        payment_cols = {row[1] for row in cursor.execute("PRAGMA table_info(payments)").fetchall()}
-        if "request_id" not in payment_cols:
-            cursor.execute("ALTER TABLE payments ADD COLUMN request_id TEXT")
-        cursor.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_request_id "
-            "ON payments(request_id) WHERE request_id IS NOT NULL"
-        )
-
         cursor.execute("SELECT COUNT(*) FROM settings WHERE id = 1")
         if cursor.fetchone()[0] == 0:
             cursor.execute("""
@@ -182,7 +135,7 @@ def parse_scan_payload(raw: Optional[str]) -> Tuple[Optional[str], Optional[int]
     return compact, int(match.group(1))
 
 
-def resolve_scan_code(conn: sqlite3.Connection, raw: Optional[str]) -> Dict[str, Any]:
+def resolve_scan_code(conn: db.Connection, raw: Optional[str]) -> Dict[str, Any]:
     """Look up the booking referenced by a scanned SMM code.
 
     Raises HTTPException(400) for malformed codes and HTTPException(404) when no
@@ -248,13 +201,182 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="SM MOIDEEN TRADERS API", lifespan=lifespan)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# The app is same-origin (API and UI on one deployment), so cross-origin
+# access stays disabled unless the owner explicitly lists allowed origins in
+# CORS_ALLOW_ORIGINS (comma separated). Wildcard origins are never used now
+# that authentication relies on cookies.
+_allowed_origins = [
+    o.strip()
+    for o in os.environ.get("CORS_ALLOW_ORIGINS", "").split(",")
+    if o.strip()
+]
+if _allowed_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_allowed_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+
+# --- Authentication ---------------------------------------------------------
+#
+# Server-side session guard. Everything that is not explicitly public requires
+# a valid SuperAdmin session, so new endpoints are protected by default
+# (fail closed). State-changing methods additionally require the session's
+# CSRF token.
+
+PUBLIC_PATHS = {
+    "/",
+    "/login",
+    "/health",
+    "/favicon.ico",
+    "/api/auth/login",
+    "/api/auth/session",
+}
+PUBLIC_PREFIXES = ("/static",)
+
+
+
+@app.middleware("http")
+async def require_session(request: Request, call_next):
+    path = request.url.path
+    try:
+        if path in PUBLIC_PATHS or path.startswith(PUBLIC_PREFIXES):
+            if path == "/" and auth.session_from_request(request) is None:
+                return RedirectResponse(url="/login", status_code=302)
+            return await call_next(request)
+
+        session = auth.session_from_request(request)
+        if session is None:
+            if path.startswith("/api/"):
+                return JSONResponse(
+                    status_code=401, content={"detail": "Not authenticated"}
+                )
+            return RedirectResponse(url="/login", status_code=302)
+
+        if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+            if not auth.csrf_matches(
+                session, request.headers.get("x-csrf-token", "")
+            ):
+                return JSONResponse(
+                    status_code=403, content={"detail": "CSRF validation failed"}
+                )
+
+        request.state.session = session
+        return await call_next(request)
+    except DatabaseConfigError:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Service is temporarily unavailable."},
+        )
+
+
+@app.exception_handler(DatabaseConfigError)
+async def database_config_error_handler(request: Request, exc: DatabaseConfigError):
+    # No credentials, paths or SQL are ever exposed.
+    return JSONResponse(
+        status_code=503, content={"detail": "Service is temporarily unavailable."}
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_error_handler(request: Request, exc: Exception):
+    import traceback
+
+    # Full detail goes to the server logs only, never to the client.
+    traceback.print_exc()
+    return JSONResponse(
+        status_code=500, content={"detail": "Internal server error"}
+    )
+
+
+class LoginSchema(BaseModel):
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=512)
+
+
+def _session_from_state(request: Request) -> Optional[dict]:
+    return getattr(request.state, "session", None) or auth.session_from_request(
+        request
+    )
+
+
+@app.get("/login")
+def serve_login(request: Request):
+    if auth.session_from_request(request) is not None:
+        return RedirectResponse(url="/", status_code=302)
+    path = os.path.join(STATIC_DIR, "login.html")
+    if os.path.exists(path):
+        return FileResponse(path)
+    return JSONResponse(status_code=404, content={"detail": "Login page missing"})
+
+
+@app.get("/health")
+def health():
+    """Operational health check: no credentials, no business data."""
+    return {"status": "ok"}
+
+
+@app.get("/api/auth/session")
+def auth_session(request: Request):
+    session = auth.session_from_request(request)
+    if not session:
+        return {"authenticated": False, "csrf_token": None, "username": None}
+    return {
+        "authenticated": True,
+        "csrf_token": session["csrf_token"],
+        "username": session["username"],
+    }
+
+
+@app.post("/api/auth/login")
+def login(data: LoginSchema, request: Request):
+    if not auth.credentials_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Sign-in is not configured yet. Set the admin environment "
+                   "variables (see README).",
+        )
+    if not auth.origin_accepted(request):
+        raise HTTPException(status_code=403, detail="Invalid request origin.")
+
+    rate_key = auth.rate_limit_key(data.username, auth.client_address(request))
+    if auth.rate_limited(rate_key):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many failed attempts. Please try again later.",
+        )
+
+    username_ok = auth.admin_username().casefold() == data.username.strip().casefold()
+    password_ok = username_ok and auth.verify_password(
+        data.password, os.environ.get("ADMIN_PASSWORD_HASH", "")
+    )
+    if not password_ok:
+        auth.record_failure(rate_key)
+        # Identical message for wrong username and wrong password.
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+
+    auth.clear_failures(rate_key)
+    # Session fixation defence: drop any session this browser still holds.
+    auth.invalidate_existing_session(request.cookies.get(auth.SESSION_COOKIE, ""))
+    cookie_value, csrf_token = auth.create_session(auth.admin_username())
+    response = JSONResponse(
+        content={"ok": True, "csrf_token": csrf_token, "username": auth.admin_username()}
+    )
+    auth.set_login_cookie(response, cookie_value)
+    return response
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request):
+    session = _session_from_state(request)
+    if session:
+        auth.delete_session(session["token_hash"])
+    response = JSONResponse(content={"ok": True})
+    auth.clear_login_cookie(response)
+    return response
 
 
 # --- Pydantic Schemas ---
@@ -375,11 +497,11 @@ class AddPaymentSchema(BaseModel):
 
 # --- Helper Functions ---
 
-def row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
+def row_to_dict(row: db.Row) -> Dict[str, Any]:
     return dict(row)
 
 
-def get_booking_with_payments(conn: sqlite3.Connection, booking_id: int) -> Optional[Dict[str, Any]]:
+def get_booking_with_payments(conn: db.Connection, booking_id: int) -> Optional[Dict[str, Any]]:
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM bookings WHERE id = ?", (booking_id,))
     row = cursor.fetchone()
@@ -392,7 +514,7 @@ def get_booking_with_payments(conn: sqlite3.Connection, booking_id: int) -> Opti
     return booking
 
 
-def generate_next_token(conn: sqlite3.Connection) -> str:
+def generate_next_token(conn: db.Connection) -> str:
     cursor = conn.cursor()
     cursor.execute("SELECT token_number FROM bookings")
     rows = cursor.fetchall()
@@ -575,10 +697,11 @@ def create_booking(data: CreateBookingSchema):
         grand_total = round(data.mutton_qty * mutton_price + data.chicken_qty * chicken_price, 2)
         advance_paid = round(min(data.advance_paid, grand_total), 2)
         balance = round(max(0.0, grand_total - advance_paid), 2)
-        booking_date = datetime.now().strftime("%Y-%m-%d")
-        token_number = generate_next_token(conn)
+        booking_date = now_ist().strftime("%Y-%m-%d")
 
-        cursor.execute("""
+        # Serverless invocations can race for the same next token; the UNIQUE
+        # index keeps data safe and we retry with the following number.
+        insert_sql = """
             INSERT INTO bookings (
                 token_number, customer_name, phone, village,
                 booking_date, function_date, pickup_time,
@@ -594,23 +717,40 @@ def create_booking(data: CreateBookingSchema):
                 ?, ?, ?,
                 'pending', ?
             )
-        """, (
-            token_number,
-            data.customer_name.strip(),
-            data.phone.strip(),
-            data.village.strip() if data.village else "",
-            booking_date,
-            func_date,
-            func_time,
-            data.mutton_qty,
-            mutton_price,
-            data.chicken_qty,
-            chicken_price,
-            grand_total,
-            advance_paid,
-            balance,
-            data.notes.strip() if data.notes else ""
-        ))
+        """
+        for _attempt in range(5):
+            token_number = generate_next_token(conn)
+            try:
+                cursor.execute(insert_sql, (
+                    token_number,
+                    data.customer_name.strip(),
+                    data.phone.strip(),
+                    data.village.strip() if data.village else "",
+                    booking_date,
+                    func_date,
+                    func_time,
+                    data.mutton_qty,
+                    mutton_price,
+                    data.chicken_qty,
+                    chicken_price,
+                    grand_total,
+                    advance_paid,
+                    balance,
+                    data.notes.strip() if data.notes else ""
+                ))
+                break
+            except db.INTEGRITY_ERRORS:
+                clash = conn.execute(
+                    "SELECT id FROM bookings WHERE token_number = ?", (token_number,)
+                ).fetchone()
+                if not clash:
+                    raise
+                conn.rollback()
+        else:
+            raise HTTPException(
+                status_code=409,
+                detail="Could not allocate a token number. Please try again.",
+            )
         booking_id = cursor.lastrowid
 
         if advance_paid > 0:
@@ -674,7 +814,7 @@ def collect_booking(booking_id: int, data: CollectBookingSchema):
         if not existing:
             raise HTTPException(status_code=404, detail="Booking not found")
 
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = now_ist().strftime("%Y-%m-%d")
         grand_total = float(existing["grand_total"])
         old_advance = float(existing["advance_paid"])
         old_balance = float(existing["balance"])
@@ -689,7 +829,7 @@ def collect_booking(booking_id: int, data: CollectBookingSchema):
                     INSERT INTO payments (booking_id, amount, payment_date, notes, request_id)
                     VALUES (?, ?, ?, 'Collection Payment', ?)
                 """, (booking_id, amount_to_receive, today, data.request_id))
-            except sqlite3.IntegrityError:
+            except db.INTEGRITY_ERRORS:
                 # A repeated scan/click using the same request id must never
                 # record a duplicate payment.
                 conn.rollback()
@@ -716,7 +856,7 @@ def add_payment(booking_id: int, data: AddPaymentSchema):
         if not existing:
             raise HTTPException(status_code=404, detail="Booking not found")
 
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = now_ist().strftime("%Y-%m-%d")
         grand_total = float(existing["grand_total"])
         old_advance = float(existing["advance_paid"])
         old_balance = float(existing["balance"])
@@ -735,7 +875,7 @@ def add_payment(booking_id: int, data: AddPaymentSchema):
                 INSERT INTO payments (booking_id, amount, payment_date, notes, request_id)
                 VALUES (?, ?, ?, ?, ?)
             """, (booking_id, data.amount, today, data.notes or "Payment", data.request_id))
-        except sqlite3.IntegrityError:
+        except db.INTEGRITY_ERRORS:
             conn.rollback()
             return get_booking_with_payments(conn, booking_id)
 
@@ -752,7 +892,7 @@ def add_payment(booking_id: int, data: AddPaymentSchema):
 
 # --- Reports ---
 
-def calculate_report_data(conn: sqlite3.Connection, start_date: str, end_date: str) -> Dict[str, Any]:
+def calculate_report_data(conn: db.Connection, start_date: str, end_date: str) -> Dict[str, Any]:
     cursor = conn.cursor()
     cursor.execute("""
         SELECT
@@ -778,14 +918,14 @@ def calculate_report_data(conn: sqlite3.Connection, start_date: str, end_date: s
 
 @app.get("/api/reports/daily")
 def daily_report():
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = now_ist().strftime("%Y-%m-%d")
     with get_db() as conn:
         return calculate_report_data(conn, today, today)
 
 
 @app.get("/api/reports/weekly")
 def weekly_report():
-    today = datetime.now().date()
+    today = now_ist().date()
     start_of_week = (today - timedelta(days=today.weekday())).strftime("%Y-%m-%d")
     end_of_week = (today + timedelta(days=6 - today.weekday())).strftime("%Y-%m-%d")
     with get_db() as conn:
@@ -828,7 +968,7 @@ def _report_filters(start: str, end: str, search: Optional[str]):
 
 
 def query_report_bookings(
-    conn: sqlite3.Connection,
+    conn: db.Connection,
     start: str,
     end: str,
     order_by: Optional[str],
@@ -841,7 +981,7 @@ def query_report_bookings(
     return [row_to_dict(r) for r in cursor.fetchall()]
 
 
-def opening_balance(conn: sqlite3.Connection, start: str, search: Optional[str]) -> float:
+def opening_balance(conn: db.Connection, start: str, search: Optional[str]) -> float:
     """Outstanding balance brought forward from records before the period."""
     cursor = conn.cursor()
     conditions = ["function_date < ?"]
@@ -903,7 +1043,7 @@ def report_pdf(
         bookings=bookings,
         opening_balance=opening,
         totals=totals,
-        generated_at=datetime.now().strftime("%d-%m-%Y %I:%M %p"),
+        generated_at=now_ist().strftime("%d-%m-%Y %I:%M %p"),
         search=search,
     )
     filename = f"collection_report_{start_s}_to_{end_s}.pdf"

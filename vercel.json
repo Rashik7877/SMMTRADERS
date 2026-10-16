@@ -1,0 +1,17 @@
+{
+  "functions": {
+    "main.py": {
+      "maxDuration": 60,
+      "includeFiles": "static/**",
+      "excludeFiles": [
+        "test_*.py",
+        "**/__pycache__/**",
+        ".pytest_cache/**",
+        "scripts/**",
+        "*.db",
+        ".env*",
+        "smm_traders.db-*"
+      ]
+    }
+  }
+}

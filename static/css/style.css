@@ -1690,14 +1690,6 @@ body {
     color: var(--navy);
     font-variant-numeric: tabular-nums;
     min-height: 58px;
-    -moz-appearance: textfield;
-    appearance: textfield;
-}
-
-.sc-amount-input::-webkit-outer-spin-button,
-.sc-amount-input::-webkit-inner-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
 }
 
 .sc-action-side {
@@ -2132,4 +2124,23 @@ body {
     .card { break-inside: avoid; box-shadow: none; border: 1px solid #ddd; }
     .report-metrics { grid-template-columns: repeat(3, 1fr); }
     .metric-card { box-shadow: none; border: 1px solid #ddd; }
+}
+
+/* ─── Numeric Inputs: Remove Native Spinner Arrows ─────────────
+   Applies to every input[type="number"] in the app (static markup and
+   dynamically injected modals/forms) in Chrome, Edge, Firefox and Safari.
+   Kept at the end of the stylesheet so no earlier equal-specificity rule
+   can re-enable the spinners. Input styling, typing, validation and
+   decimal entry are unaffected. */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    appearance: none;
+    margin: 0;
+    display: none;
+}
+
+input[type="number"] {
+    -moz-appearance: textfield;
+    appearance: textfield;
 }

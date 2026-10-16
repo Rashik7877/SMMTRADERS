@@ -1,0 +1,30 @@
+# Environments / secrets
+.env
+.env.*
+!.env.example
+
+# Generated reports
+migration_report.txt
+
+# Databases (local copies are never deployed)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+smm_traders.db-*
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Vercel / tooling
+.vercel/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
