@@ -815,10 +815,9 @@ async function submitEdit(e) {
 }
 
 async function printReceipt(id) {
-    var win = window.open('', '_blank');
+    // Open popup directly from click; avoid leaving about:blank tab in flux
+    var win = window.open('', '_blank', 'noopener');
     if (!win) { showToast('Please allow popups for this site to print receipts.', 'error'); return; }
-    win.document.write('<html><head><title>Loading...</title></head><body><p style="font-family:sans-serif;padding:40px;text-align:center;">Loading receipt...</p></body></html>');
-    win.document.close();
     try {
         var results = await Promise.all([
             api('GET', '/bookings/' + id),
@@ -853,12 +852,10 @@ async function printReceipt(id) {
                 ? '<div class="receipt-footer"><p>' + escHtml(s.receipt_footer.trim()) + '</p></div>'
                 : '') +
             '</div>';
-        win.document.clear();
-        win.document.write(
-            '<html><head><title>Receipt - ' + b.token_number + '</title>' +
+        var html = '<html><head><title>Receipt - ' + b.token_number + '</title>' +
             '<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"><\/script>' +
             '<style>' +
-            '@import url(' + "'https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap'" + ');' +
+            '@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap");' +
             '* { margin: 0; padding: 0; box-sizing: border-box; }' +
             'body { font-family: Inter, sans-serif; display: flex; justify-content: center; padding: 20px; background: #f5f5f5; }' +
             '@media print { body { background: white; padding: 0; } }' +
@@ -871,10 +868,19 @@ async function printReceipt(id) {
             '.receipt-row { display: flex; justify-content: space-between; padding: 3px 0; font-size: 0.8rem; }' +
             '.receipt-row.total { border-top: 2px solid #000; margin-top: 8px; padding-top: 8px; font-weight: 700; font-size: 0.9rem; }' +
             '.receipt-footer { text-align: center; border-top: 1px dashed #000; padding-top: 12px; font-size: 0.75rem; color: #6B7280; }' +
-            '</style></head><body>' + receipt + '<script>JsBarcode("#barcode", "' + b.token_number + '", {format:"CODE128",width:1.5,height:40,displayValue:true,margin:0});window.onload=function(){window.print();}<\/script></body></html>'
-        );
+            '</style></head><body>' + receipt +
+            '<script>' +
+            'function renderAndPrint() { try { JsBarcode("#barcode", "' + b.token_number + '", {format:"CODE128",width:1.5,height:40,displayValue:true,margin:0}); window.print(); } catch(e) { window.print(); } }' +
+            'if (document.readyState === "complete") { setTimeout(renderAndPrint, 50); } else { window.onload = function() { setTimeout(renderAndPrint, 50); }; }' +
+            '<\/script></body></html>';
+        win.document.open();
+        win.document.write(html);
         win.document.close();
-    } catch(e) { win.document.write('<p>Error loading receipt</p>'); win.document.close(); }
+        // Try to focus (may be blocked by popup blocker policy)
+        try { win.focus(); } catch (e) {}
+    } catch(e) {
+        try { win.document.write('<p>Error loading receipt</p>'); win.document.close(); } catch (x) {}
+    }
 }
 var currentUpcomingFilter = 'season';
 
