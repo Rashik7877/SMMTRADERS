@@ -815,9 +815,25 @@ async function submitEdit(e) {
 }
 
 async function printReceipt(id) {
-    // Open popup directly from click; avoid leaving about:blank tab in flux
-    var win = window.open('', '_blank', 'noopener');
-    if (!win) { showToast('Please allow popups for this site to print receipts.', 'error'); return; }
+    // Open popup directly from click to avoid popup blocking.
+    var win = window.open('', 'smm_receipt_' + Date.now());
+    if (!win) {
+        showToast('Please allow popups for this site to print receipts.', 'error');
+        return;
+    }
+    try {
+        // Show loading state immediately so the tab doesn't stay blank.
+        win.document.open();
+        win.document.write('<html><head><title>Loading Receipt...</title><style>body{font-family:sans-serif;padding:40px;text-align:center}</style></head><body><p>Loading receipt...</p></body></html>');
+        win.document.close();
+        try { win.focus(); } catch (e) {}
+    } catch (e) {
+        // If we can't write to the window, close it and notify.
+        try { win.close(); } catch (x) {}
+        showToast('Unable to open print window.', 'error');
+        return;
+    }
+
     try {
         var results = await Promise.all([
             api('GET', '/bookings/' + id),
@@ -853,6 +869,7 @@ async function printReceipt(id) {
                 : '') +
             '</div>';
         var html = '<html><head><title>Receipt - ' + b.token_number + '</title>' +
+            '<meta charset="utf-8">' +
             '<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"><\/script>' +
             '<style>' +
             '@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap");' +
@@ -870,16 +887,33 @@ async function printReceipt(id) {
             '.receipt-footer { text-align: center; border-top: 1px dashed #000; padding-top: 12px; font-size: 0.75rem; color: #6B7280; }' +
             '</style></head><body>' + receipt +
             '<script>' +
-            'function renderAndPrint() { try { JsBarcode("#barcode", "' + b.token_number + '", {format:"CODE128",width:1.5,height:40,displayValue:true,margin:0}); window.print(); } catch(e) { window.print(); } }' +
-            'if (document.readyState === "complete") { setTimeout(renderAndPrint, 50); } else { window.onload = function() { setTimeout(renderAndPrint, 50); }; }' +
+            'function renderAndPrint() {' +
+            '  try {' +
+            '    if (typeof JsBarcode !== "undefined" && document.getElementById("barcode")) {' +
+            '      JsBarcode("#barcode", "' + b.token_number + '", {format:"CODE128",width:1.5,height:40,displayValue:true,margin:0});' +
+            '    }' +
+            '    setTimeout(function(){ try { window.print(); } catch(e){} }, 30);' +
+            '  } catch(e) {' +
+            '    try { window.print(); } catch(x){}' +
+            '  }' +
+            '}' +
+            'if (document.readyState === "complete" || document.readyState === "interactive") {' +
+            '  setTimeout(renderAndPrint, 10);' +
+            '} else {' +
+            '  window.addEventListener("load", function(){ setTimeout(renderAndPrint, 10); });' +
+            '}' +
             '<\/script></body></html>';
         win.document.open();
         win.document.write(html);
         win.document.close();
-        // Try to focus (may be blocked by popup blocker policy)
         try { win.focus(); } catch (e) {}
     } catch(e) {
-        try { win.document.write('<p>Error loading receipt</p>'); win.document.close(); } catch (x) {}
+        try {
+            win.document.open();
+            win.document.write('<html><head><title>Error</title></head><body style="font-family:sans-serif;padding:40px;text-align:center"><p>Failed to load receipt. Please try again.</p></body></html>');
+            win.document.close();
+        } catch (x) {}
+        showToast('Failed to load receipt', 'error');
     }
 }
 var currentUpcomingFilter = 'season';
