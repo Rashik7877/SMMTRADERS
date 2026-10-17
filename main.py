@@ -654,17 +654,45 @@ def get_booking_with_payments(conn: db.Connection, booking_id: int) -> Optional[
 
 def generate_next_token(conn: db.Connection) -> str:
     cursor = conn.cursor()
-    cursor.execute("SELECT token_number FROM bookings")
-    rows = cursor.fetchall()
-    highest = 0  # Base number 0, so the first generated token starts at SMM0001
-    for r in rows:
+    # Compute max numeric from clean SMM tokens in SQL to avoid transferring
+    # every token row; fall back to a targeted scan only when needed.
+    cursor.execute(
+        """
+        SELECT COALESCE(
+            MAX(CAST(SUBSTR(UPPER(TRIM(token_number)), 4) AS INTEGER)),
+            0
+        )
+        FROM bookings
+        WHERE UPPER(TRIM(token_number)) LIKE 'SMM%'
+          AND LENGTH(SUBSTR(UPPER(TRIM(token_number)), 4)) > 0
+          AND SUBSTR(UPPER(TRIM(token_number)), 4) NOT GLOB '*[^0-9]*'
+        """
+    )
+    row = cursor.fetchone()
+    highest = int(row[0]) if row and row[0] is not None else 0
+
+    # Find non-SMM tokens that might contain higher digit sequences (rare).
+    cursor.execute(
+        """
+        SELECT token_number
+        FROM bookings
+        WHERE NOT (
+            UPPER(TRIM(token_number)) LIKE 'SMM%'
+            AND LENGTH(SUBSTR(UPPER(TRIM(token_number)), 4)) > 0
+            AND SUBSTR(UPPER(TRIM(token_number)), 4) NOT GLOB '*[^0-9]*'
+        )
+        """
+    )
+    for r in cursor.fetchall():
         val = str(r[0]).strip()
         if val.upper().startswith("SMM"):
             nums = val[3:]
         else:
             nums = "".join(ch for ch in val if ch.isdigit())
         if nums and nums.isdigit():
-            highest = max(highest, int(nums))
+            candidate = int(nums)
+            if candidate > highest:
+                highest = candidate
     next_num = highest + 1
     return f"SMM{next_num:04d}"
 
