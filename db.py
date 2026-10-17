@@ -58,6 +58,22 @@ def _integrity_errors() -> tuple:
 INTEGRITY_ERRORS = _integrity_errors()
 
 
+def _database_error_types() -> tuple:
+    """Errors that mean "the database is unreachable/unavailable" (503).
+
+    ``OperationalError``/``InterfaceError`` cover connection and protocol
+    failures for both backends. ``IntegrityError`` is deliberately excluded so
+    unique-constraint handling keeps its own 409 semantics.
+    """
+    errs = (sqlite3.OperationalError, sqlite3.InterfaceError)
+    if _turso is not None:
+        errs = errs + (_turso.OperationalError, _turso.InterfaceError)
+    return errs
+
+
+DATABASE_ERRORS = _database_error_types()
+
+
 class Row:
     """Minimal sqlite3.Row-compatible row (key and index access)."""
 

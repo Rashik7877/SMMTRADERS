@@ -1,8 +1,10 @@
 import calendar
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
+import logging
 import os
 import re
+import traceback
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response, status
@@ -13,11 +15,31 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 import auth
 import db
-from db import DatabaseConfigError, get_db
+from db import DATABASE_ERRORS, DatabaseConfigError, get_db
 from pdf_reports import build_report_pdf
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
+
+logger = logging.getLogger("smmtraders")
+
+# Environment values that must never be written to the logs.
+_SENSITIVE_ENV_VARS = (
+    "TURSO_DATABASE_URL",
+    "TURSO_AUTH_TOKEN",
+    "ADMIN_PASSWORD_HASH",
+    "SESSION_SECRET",
+)
+
+
+def redact_secrets(text: str) -> str:
+    """Replace any configured secret value in ``text`` with ``***``."""
+    for name in _SENSITIVE_ENV_VARS:
+        value = os.environ.get(name)
+        if value:
+            text = text.replace(value, "***")
+    return text
+
 
 # Local convenience: load a .env file so start.bat works out of the box.
 # Vercel injects real environment variables, and the test suite skips this
@@ -195,7 +217,21 @@ def resolve_scan_code(conn: db.Connection, raw: Optional[str]) -> Dict[str, Any]
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
+    # Startup must never take the whole process down. A database problem is
+    # reported per request as 503 (fail closed) instead of a blanket
+    # "Application startup failed" crash that 500s every route, including the
+    # static UI. Diagnostics are logged with secret values redacted.
+    try:
+        init_db()
+    except Exception as exc:  # broad on purpose: never crash at startup
+        logger.error(
+            "Startup database initialisation failed (%s). The app will still "
+            "start; database-backed routes will return 503 until the "
+            "connection is fixed. Verify TURSO_DATABASE_URL, TURSO_AUTH_TOKEN "
+            "and outbound network access.\n%s",
+            type(exc).__name__,
+            redact_secrets(traceback.format_exc()),
+        )
     yield
 
 
@@ -281,12 +317,25 @@ async def database_config_error_handler(request: Request, exc: DatabaseConfigErr
     )
 
 
+async def database_unavailable_handler(request: Request, exc: Exception):
+    # A reachable-but-failing database (e.g. Turso outage or timeout) is a
+    # temporary outage, not an application bug: fail closed with 503 and log
+    # only the exception type (no URLs, tokens or SQL).
+    logger.error("Database unavailable (%s); returning 503.", type(exc).__name__)
+    return JSONResponse(
+        status_code=503, content={"detail": "Service is temporarily unavailable."}
+    )
+
+
+for _db_error in DATABASE_ERRORS:
+    app.add_exception_handler(_db_error, database_unavailable_handler)
+
+
 @app.exception_handler(Exception)
 async def unhandled_error_handler(request: Request, exc: Exception):
-    import traceback
-
-    # Full detail goes to the server logs only, never to the client.
-    traceback.print_exc()
+    # Full detail goes to the server logs only (secrets redacted), never to
+    # the client.
+    logger.error("Unhandled error:\n%s", redact_secrets(traceback.format_exc()))
     return JSONResponse(
         status_code=500, content={"detail": "Internal server error"}
     )
@@ -442,11 +491,6 @@ class BaseBookingSchema(BaseModel):
         if parsed is None:
             raise ValueError("Collection date is required")
         return parsed.strftime("%Y-%m-%d")
-
-    @field_validator("pickup_time")
-    @classmethod
-    def validate_pickup_time(cls, v: Optional[str]) -> str:
-        return ""  # Collection time is fixed by Settings
 
     @field_validator("mutton_qty", "chicken_qty")
     @classmethod
