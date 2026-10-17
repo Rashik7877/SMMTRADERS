@@ -4,7 +4,9 @@ from datetime import date, datetime, timedelta, timezone
 import logging
 import os
 import re
+import time
 import traceback
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response, status
@@ -22,6 +24,35 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
 logger = logging.getLogger("smmtraders")
+
+# Performance diagnostics. Always-on and cheap: every response carries a
+# Server-Timing header so the browser devtools show where the time went. A
+# one-line summary is logged at DEBUG level; set SMM_PERF=1 to raise it to
+# INFO and SMM_PERF_VERBOSE=1 to include the per-statement breakdown.
+# Only timings, HTTP verbs, paths (never query strings), status codes and SQL
+# keywords/table names are ever recorded - no customer data or values.
+_PERF_LOG = os.environ.get("SMM_PERF") == "1"
+_PERF_VERBOSE = os.environ.get("SMM_PERF_VERBOSE") == "1"
+_PERF_LOG_LEVEL = logging.INFO if _PERF_LOG else logging.DEBUG
+
+# Time JSON serialisation into the request's perf stats without touching any
+# endpoint. This is the only global patch; it forwards to the original method
+# and never alters the bytes that are sent.
+_original_json_render = JSONResponse.render
+
+
+def _timed_json_render(self, content):
+    stats = db.current_perf()
+    if stats is None:
+        return _original_json_render(self, content)
+    started = time.perf_counter()
+    try:
+        return _original_json_render(self, content)
+    finally:
+        stats.json_seconds += time.perf_counter() - started
+
+
+JSONResponse.render = _timed_json_render
 
 # Environment values that must never be written to the logs.
 _SENSITIVE_ENV_VARS = (
@@ -309,6 +340,70 @@ async def require_session(request: Request, call_next):
         )
 
 
+_REQUEST_ID_ALLOWED = re.compile(r"[^A-Za-z0-9._:-]")
+
+
+def _request_id(request: Request) -> str:
+    """Echo the caller's correlation id (sanitised) or mint a fresh one."""
+    raw = (request.headers.get("x-request-id") or "").strip()[:64]
+    cleaned = _REQUEST_ID_ALLOWED.sub("", raw)
+    return cleaned or uuid.uuid4().hex[:16]
+
+
+@app.middleware("http")
+async def perf_timing(request: Request, call_next):
+    """Attach a request id and a Server-Timing breakdown to every response.
+
+    Defined after ``require_session`` so it wraps it: the reported totals cover
+    authentication, the handler, the database round trips and JSON rendering.
+    """
+    request_id = _request_id(request)
+    request.state.request_id = request_id
+    stats = db.start_perf()
+    started = time.perf_counter()
+    response = None
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        total_ms = (time.perf_counter() - started) * 1000.0
+        db_ms = stats.db_seconds * 1000.0
+        json_ms = stats.json_seconds * 1000.0
+        handler_ms = max(0.0, total_ms - db_ms - json_ms)
+        if response is not None:
+            response.headers["x-request-id"] = request_id
+            response.headers["Server-Timing"] = (
+                f"total;dur={total_ms:.1f}, handler;dur={handler_ms:.1f}, "
+                f"db;dur={db_ms:.1f}, json;dur={json_ms:.1f}, "
+                f'db-queries;desc="{stats.statement_count}"'
+            )
+        if logger.isEnabledFor(_PERF_LOG_LEVEL):
+            message = (
+                "perf rid=%s %s %s status=%s total=%.1fms handler=%.1fms "
+                "db=%.1fms json=%.1fms queries=%d"
+            )
+            args: List[Any] = [
+                request_id,
+                request.method,
+                request.url.path,
+                getattr(response, "status_code", 0),
+                total_ms,
+                handler_ms,
+                db_ms,
+                json_ms,
+                stats.statement_count,
+            ]
+            if _PERF_VERBOSE:
+                message += " stmts=[%s]"
+                args.append(
+                    ", ".join(
+                        f"{descriptor}:{seconds * 1000.0:.0f}ms"
+                        for descriptor, seconds in stats.statements
+                    )
+                )
+            logger.log(_PERF_LOG_LEVEL, message, *args)
+
+
 @app.exception_handler(DatabaseConfigError)
 async def database_config_error_handler(request: Request, exc: DatabaseConfigError):
     # No credentials, paths or SQL are ever exposed.
@@ -546,15 +641,14 @@ def row_to_dict(row: db.Row) -> Dict[str, Any]:
 
 
 def get_booking_with_payments(conn: db.Connection, booking_id: int) -> Optional[Dict[str, Any]]:
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM bookings WHERE id = ?", (booking_id,))
-    row = cursor.fetchone()
-    if not row:
+    booking_rows, payment_rows = db.run_batch(conn, [
+        ("SELECT * FROM bookings WHERE id = ?", (booking_id,)),
+        ("SELECT * FROM payments WHERE booking_id = ? ORDER BY id ASC", (booking_id,)),
+    ])
+    if not booking_rows:
         return None
-    booking = row_to_dict(row)
-
-    cursor.execute("SELECT * FROM payments WHERE booking_id = ? ORDER BY id ASC", (booking_id,))
-    booking["payments"] = [row_to_dict(p) for p in cursor.fetchall()]
+    booking = row_to_dict(booking_rows[0])
+    booking["payments"] = [row_to_dict(p) for p in payment_rows]
     return booking
 
 
@@ -683,10 +777,23 @@ def list_bookings(
         cursor.execute(sql, params)
         bookings = [row_to_dict(r) for r in cursor.fetchall()]
 
-        # Attach payments to each booking
+        # Attach payments to each booking in a single query instead of one
+        # round trip per booking (N+1). Ordering inside each booking stays
+        # payment-id ascending, exactly as the per-booking query did.
         for b in bookings:
-            cursor.execute("SELECT * FROM payments WHERE booking_id = ? ORDER BY id ASC", (b["id"],))
-            b["payments"] = [row_to_dict(p) for p in cursor.fetchall()]
+            b["payments"] = []
+        if bookings:
+            ids = [b["id"] for b in bookings]
+            placeholders = ",".join("?" for _ in ids)
+            cursor.execute(
+                f"SELECT * FROM payments WHERE booking_id IN ({placeholders})"
+                " ORDER BY booking_id ASC, id ASC",
+                ids,
+            )
+            grouped: Dict[int, List[Dict[str, Any]]] = {b["id"]: b["payments"] for b in bookings}
+            for p in cursor.fetchall():
+                payment = row_to_dict(p)
+                grouped.get(payment["booking_id"], []).append(payment)
 
         return bookings
 
@@ -1011,6 +1118,17 @@ def _report_filters(start: str, end: str, search: Optional[str]):
     return " AND ".join(conditions), params
 
 
+def _report_bookings_spec(
+    start: str,
+    end: str,
+    order_by: Optional[str],
+    search: Optional[str],
+) -> Tuple[str, List[Any]]:
+    where_clause, params = _report_filters(start, end, search)
+    order_clause = "ORDER BY " + REPORT_ORDERS.get(order_by or "", "token_number ASC, id ASC")
+    return f"SELECT * FROM bookings WHERE {where_clause} {order_clause}", params
+
+
 def query_report_bookings(
     conn: db.Connection,
     start: str,
@@ -1018,26 +1136,28 @@ def query_report_bookings(
     order_by: Optional[str],
     search: Optional[str],
 ) -> List[Dict[str, Any]]:
+    sql, params = _report_bookings_spec(start, end, order_by, search)
     cursor = conn.cursor()
-    where_clause, params = _report_filters(start, end, search)
-    order_clause = "ORDER BY " + REPORT_ORDERS.get(order_by or "", "token_number ASC, id ASC")
-    cursor.execute(f"SELECT * FROM bookings WHERE {where_clause} {order_clause}", params)
+    cursor.execute(sql, params)
     return [row_to_dict(r) for r in cursor.fetchall()]
 
 
-def opening_balance(conn: db.Connection, start: str, search: Optional[str]) -> float:
+def _opening_balance_spec(start: str, search: Optional[str]) -> Tuple[str, List[Any]]:
     """Outstanding balance brought forward from records before the period."""
-    cursor = conn.cursor()
     conditions = ["function_date < ?"]
     params: List[Any] = [start]
     if search and search.strip():
         q = f"%{search.strip()}%"
         conditions.append("(token_number LIKE ? OR customer_name LIKE ? OR phone LIKE ? OR village LIKE ?)")
         params.extend([q, q, q, q])
-    cursor.execute(
-        f"SELECT COALESCE(SUM(balance), 0) AS bal FROM bookings WHERE {' AND '.join(conditions)}",
-        params,
-    )
+    sql = f"SELECT COALESCE(SUM(balance), 0) AS bal FROM bookings WHERE {' AND '.join(conditions)}"
+    return sql, params
+
+
+def opening_balance(conn: db.Connection, start: str, search: Optional[str]) -> float:
+    sql, params = _opening_balance_spec(start, search)
+    cursor = conn.cursor()
+    cursor.execute(sql, params)
     return round(float(cursor.fetchone()["bal"]), 2)
 
 
@@ -1062,13 +1182,20 @@ def report_pdf(
     start_s = start.strftime("%Y-%m-%d")
     end_s = end.strftime("%Y-%m-%d")
 
+    bookings_sql, bookings_params = _report_bookings_spec(start_s, end_s, order_by, search)
+    opening_sql, opening_params = _opening_balance_spec(start_s, search)
+
+    # Three independent reads: one combined round trip instead of three.
     with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM settings WHERE id = 1")
-        settings_row = cursor.fetchone()
-        settings = row_to_dict(settings_row) if settings_row else {}
-        bookings = query_report_bookings(conn, start_s, end_s, order_by, search)
-        opening = opening_balance(conn, start_s, search)
+        settings_rows, booking_rows, opening_rows = db.run_batch(conn, [
+            ("SELECT * FROM settings WHERE id = 1", None),
+            (bookings_sql, bookings_params),
+            (opening_sql, opening_params),
+        ])
+
+    settings = row_to_dict(settings_rows[0]) if settings_rows else {}
+    bookings = [row_to_dict(r) for r in booking_rows]
+    opening = round(float(opening_rows[0]["bal"]), 2)
 
     totals = {
         "count": len(bookings),

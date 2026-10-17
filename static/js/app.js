@@ -205,12 +205,55 @@ function formatApiError(detail) {
     return String(detail);
 }
 var _csrfToken = null;
+
+// Lightweight client-side timing. Every API call carries a correlation id and
+// its Server-Timing breakdown is kept in a bounded in-memory log. Only the
+// request path is stored - never the query string, which can carry a customer
+// name, phone number or search term. Inspect with window.smmPerf.summary().
+window.__perfLog = window.__perfLog || [];
+function _newRequestId() {
+    try {
+        if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+    } catch (e) {}
+    return 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+}
+function _parseServerTiming(value) {
+    var out = {};
+    (value || '').split(',').forEach(function (part) {
+        var bits = part.split(';');
+        var name = (bits.shift() || '').trim();
+        if (!name) return;
+        bits.forEach(function (bit) {
+            var kv = bit.split('=');
+            var key = (kv[0] || '').trim();
+            if (key === 'dur') out[name] = parseFloat(kv[1]);
+            if (key === 'desc') out[name] = (kv[1] || '').replace(/"/g, '');
+        });
+    });
+    return out;
+}
+function _recordPerf(entry) {
+    var log = window.__perfLog;
+    log.push(entry);
+    if (log.length > 200) log.splice(0, log.length - 200);
+}
+window.smmPerf = {
+    log: window.__perfLog,
+    summary: function () { return window.__perfLog.slice(); },
+    clear: function () { window.__perfLog.length = 0; }
+};
+
 async function api(method, url, body) {
-    var opts = { method: method, headers: { 'Content-Type': 'application/json' } };
+    var requestId = _newRequestId();
+    var opts = {
+        method: method,
+        headers: { 'Content-Type': 'application/json', 'X-Request-Id': requestId }
+    };
     if (method !== 'GET' && _csrfToken) opts.headers['X-CSRF-Token'] = _csrfToken;
     if (body && method !== 'GET') opts.body = JSON.stringify(body);
     var fetchUrl = '/api' + url;
     if (method === 'GET') fetchUrl += (url.includes('?') ? '&' : '?') + '_t=' + Date.now();
+    var started = (window.performance && performance.now) ? performance.now() : Date.now();
     try {
         var res = await fetch(fetchUrl, opts);
         if (res.status === 401) {
@@ -221,7 +264,17 @@ async function api(method, url, body) {
             var err = await res.json().catch(function() { return { detail: 'Request failed' }; });
             throw new Error(formatApiError(err.detail));
         }
-        return await res.json();
+        var payload = await res.json();
+        var finished = (window.performance && performance.now) ? performance.now() : Date.now();
+        _recordPerf({
+            rid: requestId,
+            method: method,
+            path: ('/api' + url).split('?')[0],
+            status: res.status,
+            clientMs: Math.round((finished - started) * 10) / 10,
+            server: _parseServerTiming(res.headers.get('Server-Timing'))
+        });
+        return payload;
     } catch (e) {
         showToast(e.message, 'error');
         throw e;
@@ -767,8 +820,12 @@ async function printReceipt(id) {
     win.document.write('<html><head><title>Loading...</title></head><body><p style="font-family:sans-serif;padding:40px;text-align:center;">Loading receipt...</p></body></html>');
     win.document.close();
     try {
-        var b = await api('GET', '/bookings/' + id);
-        var s = await api('GET', '/settings');
+        var results = await Promise.all([
+            api('GET', '/bookings/' + id),
+            api('GET', '/settings')
+        ]);
+        var b = results[0];
+        var s = results[1];
         var receipt = '<div class="receipt" id="receipt-content">' +
             '<div class="receipt-header">' +
             '<h2>' + escHtml(s.business_name) + '</h2>' +
@@ -1131,8 +1188,12 @@ async function loadReport(period, sort) {
     container.innerHTML = '<div style="text-align:center;padding:24px;color:var(--text-secondary);">Loading ordered report data...</div>';
 
     try {
-        var data = await api('GET', '/reports/custom?start_date=' + range.start + '&end_date=' + range.end);
-        var bookings = await api('GET', '/bookings?start_date=' + range.start + '&end_date=' + range.end + '&order_by=' + encodeURIComponent(currentReportSort) + '&limit=5000');
+        var results = await Promise.all([
+            api('GET', '/reports/custom?start_date=' + range.start + '&end_date=' + range.end),
+            api('GET', '/bookings?start_date=' + range.start + '&end_date=' + range.end + '&order_by=' + encodeURIComponent(currentReportSort) + '&limit=5000')
+        ]);
+        var data = results[0];
+        var bookings = results[1];
         currentReportData = data;
         currentReportBookings = bookings;
         renderReportView(range.label, data, bookings);
@@ -1258,9 +1319,14 @@ function downloadPDF() {
 async function printReport() {
     var range = getReportDateRange(currentReportPeriod);
     try {
-        var data = currentReportData || await api('GET', '/reports/custom?start_date=' + range.start + '&end_date=' + range.end);
-        var bookings = await api('GET', '/bookings?start_date=' + range.start + '&end_date=' + range.end + '&order_by=' + encodeURIComponent(currentReportSort) + '&limit=5000');
-        var s = await api('GET', '/settings');
+        var results = await Promise.all([
+            currentReportData ? Promise.resolve(currentReportData) : api('GET', '/reports/custom?start_date=' + range.start + '&end_date=' + range.end),
+            api('GET', '/bookings?start_date=' + range.start + '&end_date=' + range.end + '&order_by=' + encodeURIComponent(currentReportSort) + '&limit=5000'),
+            api('GET', '/settings')
+        ]);
+        var data = results[0];
+        var bookings = results[1];
+        var s = results[2];
         var win = window.open('', '_blank');
         if (!win) { showToast('Please allow popups for printing.', 'error'); return; }
         var now = new Date();

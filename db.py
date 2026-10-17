@@ -13,9 +13,11 @@ DB-API style connection wrapper that behaves identically for both backends:
 Turso credentials are only ever read from server-side environment variables.
 """
 
+import contextvars
 import os
 import sqlite3
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+import time
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SQLITE_PATH = os.environ.get(
@@ -72,6 +74,155 @@ def _database_error_types() -> tuple:
 
 
 DATABASE_ERRORS = _database_error_types()
+
+
+# --- Request-scoped performance accounting ----------------------------------
+#
+# Each HTTP request may start a PerfStats collector. Statement timings are
+# recorded here so the API can expose (and optionally log) where the time goes.
+# Only a SQL descriptor - the leading keyword and the first table name - is
+# ever stored; parameters, values and customer data are never captured.
+
+class PerfStats:
+    """Per-request counters: statement count, database and JSON render time."""
+
+    __slots__ = ("statements", "db_seconds", "json_seconds")
+
+    def __init__(self) -> None:
+        self.statements: List[Tuple[str, float]] = []
+        self.db_seconds = 0.0
+        self.json_seconds = 0.0
+
+    @property
+    def statement_count(self) -> int:
+        return len(self.statements)
+
+    def record(self, descriptor: str, seconds: float) -> None:
+        self.statements.append((descriptor, seconds))
+        self.db_seconds += seconds
+
+
+_perf_stats: "contextvars.ContextVar[Optional[PerfStats]]" = contextvars.ContextVar(
+    "smm_perf_stats", default=None
+)
+
+_SQL_KEYWORDS = ("FROM", "INTO", "UPDATE", "TABLE", "JOIN")
+_SQL_SKIP_WORDS = {"IF", "NOT", "EXISTS", "OR", "REPLACE", "TEMPORARY"}
+
+
+def describe_sql(sql: Any) -> str:
+    """Return "<keyword> <first table>" for a statement, never its values."""
+    words = str(sql).split()
+    if not words:
+        return "?"
+    keyword = words[0].upper()
+    target = ""
+    for index, word in enumerate(words):
+        if word.upper() in _SQL_KEYWORDS:
+            nxt = index + 1
+            while nxt < len(words) and words[nxt].upper() in _SQL_SKIP_WORDS:
+                nxt += 1
+            if nxt < len(words):
+                target = words[nxt].strip("();,")
+            break
+    return f"{keyword} {target}".strip()
+
+
+def start_perf() -> PerfStats:
+    """Begin collecting statement timings for the current request context."""
+    stats = PerfStats()
+    _perf_stats.set(stats)
+    return stats
+
+
+def current_perf() -> Optional[PerfStats]:
+    """The active collector for the current request context, if any."""
+    return _perf_stats.get()
+
+
+def _record(descriptor: str, seconds: float) -> None:
+    stats = _perf_stats.get()
+    if stats is not None:
+        stats.record(descriptor, seconds)
+
+
+# --- Batched read-only statements -------------------------------------------
+#
+# Turso speaks SQL over HTTP: one round trip per statement by default. Several
+# independent reads can share a single `/v3/pipeline` request, which cuts
+# latency roughly in proportion to the statement count. Batching is only ever
+# attempted for read-only statements, and any failure falls back to the normal
+# (already proven) per-statement path, so results never change.
+
+_READ_ONLY_PREFIXES = ("SELECT", "PRAGMA", "WITH", "EXPLAIN", "VALUES")
+
+
+def _is_read_only(sql: Any) -> bool:
+    words = str(sql).split(maxsplit=1)
+    return bool(words) and words[0].upper() in _READ_ONLY_PREFIXES
+
+
+def _turso_batch(conn: "Connection", statements: List[Tuple[str, Any]]) -> List[List["Row"]]:
+    """Run read-only statements through one Turso pipeline request."""
+    from turso_serverless.protocol import build_batch_step, decode_value
+
+    session = getattr(conn._inner, "_session", None)
+    if session is None or not hasattr(session, "execute_pipeline"):
+        raise RuntimeError("Turso session does not support pipelines")
+
+    requests = []
+    for sql, params in statements:
+        args = list(params) if params else None
+        step = build_batch_step(sql, args=args, want_rows=True)
+        requests.append({"type": "execute", "stmt": step["stmt"]})
+
+    results = session.execute_pipeline(requests)
+    if len(results) != len(statements):
+        raise RuntimeError("pipeline returned an unexpected result count")
+
+    batched: List[List["Row"]] = []
+    for result in results:
+        response = result.get("response") or {}
+        if result.get("type") != "ok" or response.get("type") != "execute":
+            # Fall back to per-statement execution so a server-side error
+            # surfaces through the normal driver error mapping.
+            raise RuntimeError("pipeline statement failed")
+        payload = response.get("result") or {}
+        keys = [column.get("name") or "" for column in payload.get("cols") or []]
+        rows = [
+            Row(keys, [decode_value(value) for value in row])
+            for row in payload.get("rows") or []
+        ]
+        batched.append(rows)
+    return batched
+
+
+def run_batch(conn: "Connection", statements: List[Tuple[str, Any]]) -> List[List["Row"]]:
+    """Execute read-only ``(sql, params)`` pairs and return one row list each.
+
+    On Turso the statements travel in a single HTTP round trip; on SQLite (or
+    if anything about the batched path is unsupported) they run sequentially.
+    Batched execution is attempted only when every statement is read-only, so
+    callers can never observe a different result or a different side effect.
+    """
+    if len(statements) > 1 and all(_is_read_only(sql) for sql, _ in statements):
+        t0 = time.perf_counter()
+        try:
+            rows = _turso_batch(conn, statements) if conn.backend == "turso" else None
+            if rows is not None:
+                elapsed = time.perf_counter() - t0
+                _record(
+                    "BATCH[{0}] {1}".format(
+                        len(statements),
+                        ",".join(describe_sql(sql).split()[0] for sql, _ in statements),
+                    ),
+                    elapsed,
+                )
+                return rows
+        except Exception:
+            # Proven per-statement path below; batching must never break a read.
+            pass
+    return [conn.execute(sql, params).fetchall() for sql, params in statements]
 
 
 class Row:
@@ -146,15 +297,23 @@ class _Cursor:
         return Row(self._keys, _to_values(row, self._keys))
 
     def execute(self, sql: str, params: Any = None):
-        if params is None:
-            self._cur.execute(sql)
-        else:
-            self._cur.execute(sql, params)
+        started = time.perf_counter()
+        try:
+            if params is None:
+                self._cur.execute(sql)
+            else:
+                self._cur.execute(sql, params)
+        finally:
+            _record(describe_sql(sql), time.perf_counter() - started)
         self._refresh_keys()
         return self
 
     def executemany(self, sql: str, seq_of_params: Iterable):
-        self._cur.executemany(sql, seq_of_params)
+        started = time.perf_counter()
+        try:
+            self._cur.executemany(sql, seq_of_params)
+        finally:
+            _record(describe_sql(sql) + " [many]", time.perf_counter() - started)
         self._refresh_keys()
         return self
 
@@ -334,6 +493,18 @@ SCHEMA_STATEMENTS: List[tuple] = [
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_request_id "
         "ON payments(request_id) WHERE request_id IS NOT NULL"
     ),
+    (
+        "CREATE INDEX IF NOT EXISTS idx_payments_booking_id "
+        "ON payments(booking_id)"
+    ),
+    (
+        "CREATE INDEX IF NOT EXISTS idx_bookings_function_date "
+        "ON bookings(function_date)"
+    ),
+    (
+        "CREATE INDEX IF NOT EXISTS idx_bookings_balance "
+        "ON bookings(balance)"
+    ),
 ]
 
 # Columns added by older app versions; kept idempotent for fresh databases.
@@ -344,10 +515,36 @@ COLUMN_MIGRATIONS: List[tuple] = [
 ]
 
 
+def run_script(conn: Connection, statements: Sequence[str]) -> None:
+    """Run idempotent DDL statements in as few round trips as possible.
+
+    On Turso the whole script travels in one ``sequence`` pipeline request; on
+    SQLite (or if the script endpoint is unavailable) the statements run one
+    by one. Statements are always ``IF NOT EXISTS`` DDL, so retrying them is
+    harmless and a fallback can never corrupt the schema.
+    """
+    if conn.backend == "turso" and len(statements) > 1:
+        session = getattr(conn._inner, "_session", None)
+        if session is not None and hasattr(session, "execute_pipeline"):
+            try:
+                results = session.execute_pipeline(
+                    [{"type": "sequence", "sql": ";\n".join(statements)}]
+                )
+                for result in results:
+                    if result.get("type") == "error":
+                        # Fall back so the failure surfaces with the normal
+                        # driver error type (startup logging depends on it).
+                        raise RuntimeError("schema script failed")
+                return
+            except Exception:
+                pass
+    for statement in statements:
+        conn.execute(statement)
+
+
 def ensure_schema(conn: Connection) -> None:
     """Create tables, indexes and missing columns. Never drops data."""
-    for statement in SCHEMA_STATEMENTS:
-        conn.execute(statement)
+    run_script(conn, [statement for statement in SCHEMA_STATEMENTS])
     for table, column, ddl in COLUMN_MIGRATIONS:
         conn.ensure_column(table, column, ddl)
     conn.commit()

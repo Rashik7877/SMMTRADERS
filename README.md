@@ -27,7 +27,7 @@ API endpoint.
 
 | Piece | Local | Vercel |
 |---|---|---|
-| Web framework | FastAPI (`main.py`, app auto-detected) | same |
+| Web framework | FastAPI (`main.py`, exports `app`) | same — `framework: "fastapi"` |
 | Database | SQLite `smm_traders.db` | Turso (libSQL) via `turso_serverless` |
 | UI | `static/` (index.html + app.js + style.css) | served from the same function |
 | Auth | `auth.py` (sessions in the database) | same |
@@ -132,13 +132,19 @@ error. Safe to re-run — already-migrated rows are ignored, and conflicts
 ## Deploying to Vercel
 
 1. Push this repository to GitHub (Vercel builds from the remote).
-2. Import the project in Vercel. The Python runtime detects `main.py`
-   automatically — no build command needed.
+2. Import the project in Vercel. `vercel.json` pins `framework: "fastapi"`,
+   so the Python preset loads `main.py` (which exports `app`) as a catch-all
+   function — no build command needed.
 3. Add the environment variables listed below (Production).
 4. Deploy, then visit the site and sign in.
 
-`vercel.json` sets a 60-second function limit and excludes tests, scripts,
-local databases and secrets from the upload.
+`.vercelignore` keeps tests, scripts, local databases and secrets out of the
+uploaded bundle. No custom function timeout is configured, so the platform
+default (300s with Fluid compute) applies.
+
+> A root-level catch-all app cannot be targeted by the `vercel.json`
+> `functions` key (it only matches per-file functions under `api/`); the
+> `framework` preset is the supported way to serve it.
 
 ## Environment variables
 
